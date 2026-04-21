@@ -1,17 +1,20 @@
 const jwt = require('jsonwebtoken');
 
 const protect = (req, res, next) => {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
+  // Support both cookie (browser) and Authorization header (Postman)
+  const token =
+    req.cookies?.token ||
+    (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.split(' ')[1]);
+
+  if (!token) {
     return res.status(401).json({ success: false, message: 'Not authorized, no token' });
   }
-  const token = header.split(' ')[1];
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_dev_secret');
     req.userId = decoded.id;
     next();
   } catch {
-    return res.status(401).json({ success: false, message: 'Token invalid or expired' });
+    res.status(401).json({ success: false, message: 'Token invalid or expired' });
   }
 };
 
