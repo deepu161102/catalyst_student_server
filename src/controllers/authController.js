@@ -2,11 +2,12 @@ const jwt      = require('jsonwebtoken');
 const bcrypt   = require('bcryptjs');
 const Student  = require('../models/Student');
 
+const isProd = process.env.NODE_ENV === 'production';
 const COOKIE_OPTS = {
-  httpOnly: true,   // JS cannot read this cookie — prevents XSS theft
-  secure: process.env.NODE_ENV === 'production', // HTTPS only in prod
-  sameSite: 'lax',
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
+  httpOnly: true,
+  secure: isProd,           // HTTPS only in prod
+  sameSite: isProd ? 'none' : 'lax', // 'none' required for cross-origin cookies
+  maxAge: 7 * 24 * 60 * 60 * 1000,  // 7 days in ms
 };
 
 const signToken = (id) =>
