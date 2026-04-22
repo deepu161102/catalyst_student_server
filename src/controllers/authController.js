@@ -11,7 +11,7 @@ const COOKIE_OPTS = {
 };
 
 const signToken = (id) =>
-  jwt.sign({ id }, process.env.JWT_SECRET || 'fallback_dev_secret', { expiresIn: '7d' });
+    jwt.sign({ id }, process.env.JWT_SECRET || 'fallback_dev_secret', { expiresIn: '7d' });
 
 // POST /api/auth/login
 const login = async (req, res) => {
@@ -69,9 +69,9 @@ const updateMe = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Name is required' });
     }
     const student = await Student.findByIdAndUpdate(
-      req.userId,
-      { name: name.trim() },
-      { new: true, runValidators: true }
+        req.userId,
+        { name: name.trim() },
+        { new: true, runValidators: true }
     );
     res.json({ success: true, data: student });
   } catch (error) {
@@ -80,3 +80,4 @@ const updateMe = async (req, res) => {
 };
 
 module.exports = { login, logout, getMe, updateMe };
+

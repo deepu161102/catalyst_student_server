@@ -29,6 +29,9 @@ const createStudent = async (req, res) => {
     const student = await Student.create(req.body);
     res.status(201).json({ success: true, data: student });
   } catch (error) {
+    if(error.code === 11000) {
+      res.status(400).json({ success: false, message: "Email already exists. Please use a different one." });
+    }
     res.status(400).json({ success: false, message: error.message });
   }
 };
