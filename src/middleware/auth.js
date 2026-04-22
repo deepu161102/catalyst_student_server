@@ -1,19 +1,21 @@
 const jwt = require('jsonwebtoken');
-const Student = require('../models/Student');
 
-const protect = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ success: false, message: 'Not authorized' });
+const protect = (req, res, next) => {
+  // Support both cookie (browser) and Authorization header (Postman)
+  const token =
+    req.cookies?.token ||
+    (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.split(' ')[1]);
+
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Not authorized, no token' });
   }
   try {
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.student = await Student.findById(decoded.id);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_dev_secret');
+    req.userId = decoded.id;
     next();
   } catch {
-    res.status(401).json({ success: false, message: 'Invalid token' });
+    res.status(401).json({ success: false, message: 'Token invalid or expired' });
   }
 };
 
-module.exports = { protect };
+module.exports = protect;
