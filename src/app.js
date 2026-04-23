@@ -9,9 +9,17 @@ const { notFound, errorHandler } = require('./middleware/errorHandler');
 const app = express();
 
 app.use(helmet());
+const ALLOWED_ORIGINS = process.env.CLIENT_URL
+  ? process.env.CLIENT_URL.split(',').map(o => o.trim())
+  : ['http://localhost:5173', 'http://localhost:5174'];
+
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
-  credentials: true, // required for cookies to be sent cross-origin
+  origin: (origin, cb) => {
+    // allow server-to-server requests (no Origin header) and whitelisted origins
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
 }));
 app.use(morgan('dev'));
 app.use(express.json());
@@ -25,6 +33,8 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/auth',     require('./routes/authRoutes'));
 app.use('/api/students', require('./routes/studentRoutes'));
+app.use('/api/mentors',  require('./routes/mentorRoutes'));
+app.use('/api/batches',  require('./routes/batchRoutes'));
 app.use('/api/chat',     require('./routes/chatRoutes'));
 
 app.use(notFound);

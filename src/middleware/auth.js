@@ -11,7 +11,8 @@ const protect = (req, res, next) => {
   }
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_dev_secret');
-    req.userId = decoded.id;
+    req.userId   = decoded.id;
+    req.userRole = decoded.role || 'student'; // backward-compat: old tokens without role field default to student
     next();
   } catch {
     res.status(401).json({ success: false, message: 'Token invalid or expired' });
