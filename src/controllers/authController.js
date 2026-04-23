@@ -1,17 +1,19 @@
-const jwt      = require('jsonwebtoken');
-const bcrypt   = require('bcryptjs');
-const Student  = require('../models/Student');
+const jwt        = require('jsonwebtoken');
+const bcrypt     = require('bcryptjs');
+const Student    = require('../models/Student');
+const Mentor     = require('../models/Mentor');
+const Operations = require('../models/Operations');
 
 const isProd = process.env.NODE_ENV === 'production';
 const COOKIE_OPTS = {
   httpOnly: true,
-  secure: isProd,           // HTTPS only in prod
-  sameSite: isProd ? 'none' : 'lax', // 'none' required for cross-origin cookies
-  maxAge: 7 * 24 * 60 * 60 * 1000,  // 7 days in ms
+  secure:   isProd,
+  sameSite: isProd ? 'none' : 'lax',
+  maxAge:   7 * 24 * 60 * 60 * 1000,
 };
 
-const signToken = (id) =>
-    jwt.sign({ id }, process.env.JWT_SECRET || 'fallback_dev_secret', { expiresIn: '7d' });
+const signToken = (id, role) =>
+  jwt.sign({ id, role }, process.env.JWT_SECRET || 'fallback_dev_secret', { expiresIn: '7d' });
 
 // POST /api/auth/login
 const login = async (req, res) => {
@@ -21,24 +23,36 @@ const login = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email and password are required' });
     }
 
-    const student = await Student.findOne({ email: email.toLowerCase().trim() }).select('+password');
-    if (!student || !student.password) {
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Try Student → Mentor → Operations
+    let user = await Student.findOne({ email: normalizedEmail }).select('+password');
+    let role = 'student';
+
+    if (!user) {
+      user = await Mentor.findOne({ email: normalizedEmail }).select('+password');
+      role = 'mentor';
+    }
+
+    if (!user) {
+      user = await Operations.findOne({ email: normalizedEmail }).select('+password');
+      role = 'operations';
+    }
+
+    if (!user || !user.password) {
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
-    const isMatch = await bcrypt.compare(password, student.password);
+    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
-    const token = signToken(student._id);
-
-    // Set httpOnly cookie (browser uses this automatically)
+    const token = signToken(user._id, role);
     res.cookie('token', token, COOKIE_OPTS);
 
-    const { password: _p, ...data } = student.toObject();
-    // Also return token in body so Postman can use it via Authorization header
-    res.json({ success: true, token, data });
+    const { password: _p, ...rest } = user.toObject();
+    res.json({ success: true, token, data: { ...rest, role } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -50,12 +64,15 @@ const logout = (_req, res) => {
   res.json({ success: true, message: 'Logged out' });
 };
 
+const getModel = (role) => role === 'student' ? Student : role === 'mentor' ? Mentor : Operations;
+
 // GET /api/auth/me
 const getMe = async (req, res) => {
   try {
-    const student = await Student.findById(req.userId);
-    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
-    res.json({ success: true, data: student });
+    const Model = getModel(req.userRole);
+    const user  = await Model.findById(req.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    res.json({ success: true, data: { ...user.toObject(), role: req.userRole } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -68,16 +85,16 @@ const updateMe = async (req, res) => {
     if (!name?.trim()) {
       return res.status(400).json({ success: false, message: 'Name is required' });
     }
-    const student = await Student.findByIdAndUpdate(
-        req.userId,
-        { name: name.trim() },
-        { new: true, runValidators: true }
+    const Model = getModel(req.userRole);
+    const user  = await Model.findByIdAndUpdate(
+      req.userId,
+      { name: name.trim() },
+      { new: true, runValidators: true }
     );
-    res.json({ success: true, data: student });
+    res.json({ success: true, data: { ...user.toObject(), role: req.userRole } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
 module.exports = { login, logout, getMe, updateMe };
-

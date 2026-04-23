@@ -8,14 +8,18 @@ const onlineUsers = new Map();
 const setupSocket = (server) => {
   const io = new Server(server, {
     cors: {
-      origin:      process.env.CLIENT_URL || 'http://localhost:5173',
+      origin: process.env.CLIENT_URL
+        ? process.env.CLIENT_URL.split(',').map(o => o.trim())
+        : ['http://localhost:5173', 'http://localhost:5174'],
       credentials: true,
     },
   });
 
   // ── Auth middleware ──────────────────────────────────────────────────────────
   io.use((socket, next) => {
-    const token = socket.handshake.auth.token || socket.handshake.query.token;
+    const cookieHeader = socket.handshake.headers.cookie || '';
+    const cookieToken  = cookieHeader.split(';').map(s => s.trim()).find(s => s.startsWith('token='))?.slice(6) || null;
+    const token = socket.handshake.auth.token || socket.handshake.query.token || cookieToken;
     if (!token) {
       console.log('[Socket] Auth failed: no token provided');
       return next(new Error('Authentication required'));

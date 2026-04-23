@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git count-objects *)",
+      "Bash(git version *)",
+      "Bash(npm install *)",
+      "Bash(npm list *)",
+      "Bash(node --check src/server.js)",
+      "Bash(node --check src/controllers/authController.js)",
+      "Bash(node --check src/controllers/chatController.js)",
+      "Bash(node --check src/middleware/auth.js)",
+      "Bash(node --check src/models/Batch.js)",
+      "Bash(node --check src/models/Student.js)",
+      "Bash(node --check src/controllers/batchController.js)",
+      "Bash(node --check src/controllers/studentController.js)",
+      "Bash(node --check src/routes/batchRoutes.js)"
+    ]
+  }
+}

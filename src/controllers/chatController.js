@@ -1,17 +1,18 @@
 const mongoose = require('mongoose');
-const Message = require('../models/Message');
-const Student = require('../models/Student');
+const Message  = require('../models/Message');
+const Student  = require('../models/Student');
+const Mentor   = require('../models/Mentor');
+const Batch    = require('../models/Batch');
 
 // GET /api/chat/conversations/:userId
 // Returns list of users the person has chatted with, with last message + unread count.
+// Looks up name/email from both Student and Mentor collections.
 const getConversations = async (req, res) => {
   try {
     const userId = new mongoose.Types.ObjectId(req.params.userId);
 
     const conversations = await Message.aggregate([
-      {
-        $match: { $or: [{ senderId: userId }, { receiverId: userId }] },
-      },
+      { $match: { $or: [{ senderId: userId }, { receiverId: userId }] } },
       { $sort: { timestamp: -1 } },
       {
         $addFields: {
@@ -22,7 +23,7 @@ const getConversations = async (req, res) => {
       },
       {
         $group: {
-          _id: '$otherUserId',
+          _id:         '$otherUserId',
           lastMessage: { $first: '$message' },
           lastTime:    { $first: '$timestamp' },
           unreadCount: {
@@ -36,20 +37,28 @@ const getConversations = async (req, res) => {
           },
         },
       },
+      // Look up in both collections — only one will match per _id
       {
         $lookup: {
-          from:         'students',
-          localField:   '_id',
-          foreignField: '_id',
-          as:           'user',
+          from: 'students', localField: '_id', foreignField: '_id', as: 'studentUser',
         },
       },
-      { $unwind: '$user' },
+      {
+        $lookup: {
+          from: 'mentors', localField: '_id', foreignField: '_id', as: 'mentorUser',
+        },
+      },
+      {
+        $addFields: {
+          userArray: { $concatArrays: ['$studentUser', '$mentorUser'] },
+        },
+      },
+      { $unwind: '$userArray' },
       {
         $project: {
           userId:      '$_id',
-          name:        '$user.name',
-          email:       '$user.email',
+          name:        '$userArray.name',
+          email:       '$userArray.email',
           lastMessage: 1,
           lastTime:    1,
           unreadCount: 1,
@@ -65,7 +74,6 @@ const getConversations = async (req, res) => {
 };
 
 // GET /api/chat/messages/:userId/:otherUserId?page=1&limit=50
-// Returns paginated message history between two users, oldest-first.
 const getMessages = async (req, res) => {
   try {
     const { userId, otherUserId } = req.params;
@@ -96,7 +104,6 @@ const getMessages = async (req, res) => {
 };
 
 // PUT /api/chat/messages/read
-// Body: { senderId, receiverId } — marks all messages from sender to receiver as read.
 const markRead = async (req, res) => {
   try {
     const { senderId, receiverId } = req.body;
@@ -108,25 +115,43 @@ const markRead = async (req, res) => {
 };
 
 // GET /api/chat/users/search?q=searchTerm
-// Searches students by name or email, excludes the current user.
+// Batch-scoped: students only see their mentor; mentors only see their batch students.
 const searchUsers = async (req, res) => {
   try {
-    const { q } = req.query;
+    const { q }         = req.query;
     const currentUserId = req.userId;
+    const role          = req.userRole || 'student';
+    const textFilter    = q
+      ? { $or: [{ name: { $regex: q, $options: 'i' } }, { email: { $regex: q, $options: 'i' } }] }
+      : {};
 
-    const filter = {
-      _id: { $ne: currentUserId },
-      ...(q
-        ? {
-            $or: [
-              { name:  { $regex: q, $options: 'i' } },
-              { email: { $regex: q, $options: 'i' } },
-            ],
-          }
-        : {}),
-    };
+    if (role === 'student') {
+      // Student → return only their assigned mentor (1 result max)
+      const student = await Student.findById(currentUserId).select('batchId').lean();
+      if (!student?.batchId) return res.json({ success: true, data: [] });
 
-    const users = await Student.find(filter).limit(20).select('name email');
+      const batch = await Batch.findById(student.batchId).select('mentorId').lean();
+      if (!batch?.mentorId) return res.json({ success: true, data: [] });
+
+      const mentor = await Mentor.findOne({ _id: batch.mentorId, ...textFilter })
+        .select('name email').lean();
+      return res.json({ success: true, data: mentor ? [mentor] : [] });
+    }
+
+    // Mentor/Operations → return only students in their batches
+    // Step 1: mentor's batch IDs (uses mentorId index on Batch)
+    const batches  = await Batch.find({ mentorId: currentUserId }).select('_id').lean();
+    const batchIds = batches.map(b => b._id);
+
+    if (!batchIds.length) return res.json({ success: true, data: [] });
+
+    // Step 2: students in those batches (uses batchId index on Student)
+    const users = await Student
+      .find({ batchId: { $in: batchIds }, ...textFilter })
+      .limit(50)
+      .select('name email batchId')
+      .lean();
+
     res.json({ success: true, data: users });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
