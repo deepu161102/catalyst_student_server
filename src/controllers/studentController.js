@@ -41,10 +41,16 @@ const getStudentById = async (req, res) => {
 // Returns all {mentor, batch} pairs for a student — used by student portal profile/sidebar.
 const getStudentMentor = async (req, res) => {
   try {
-    const student = await Student.findById(req.params.id).select('batchIds').lean();
-    if (!student?.batchIds?.length) return res.json({ success: true, data: [] });
+    const student = await Student.findById(req.params.id).select('batchIds batchId').lean();
 
-    const batches = await Batch.find({ _id: { $in: student.batchIds } })
+    // Support legacy batchId (single) while batchIds (array) hasn't been migrated yet
+    const ids = student?.batchIds?.length ? student.batchIds
+              : student?.batchId           ? [student.batchId]
+              : [];
+
+    if (!ids.length) return res.json({ success: true, data: [] });
+
+    const batches = await Batch.find({ _id: { $in: ids } })
       .populate('mentorId', 'name email specialization phone')
       .select('name course mentorId startDate endDate status')
       .lean();
@@ -75,20 +81,23 @@ const getStudentsByMentor = async (req, res) => {
 
     if (!batchIds.length) return res.json({ success: true, data: [] });
 
-    // Step 2: students in any of those batches (batchIds is now an array)
+    // Step 2: students in any of those batches — support both old batchId and new batchIds
     const batchMap = Object.fromEntries(batches.map(b => [b._id.toString(), b]));
     const students = await Student
-      .find({ batchIds: { $in: batchIds } })
-      .select('name email phone progress totalSessions completedSessions batchIds enrollmentDate isActive')
+      .find({ $or: [{ batchIds: { $in: batchIds } }, { batchId: { $in: batchIds } }] })
+      .select('name email phone progress totalSessions completedSessions batchIds batchId enrollmentDate isActive')
       .lean();
 
     // Attach only the batches belonging to this mentor
-    const data = students.map(s => ({
-      ...s,
-      batches: (s.batchIds || [])
-        .filter(id => batchMap[id?.toString()])
-        .map(id => batchMap[id?.toString()]),
-    }));
+    const data = students.map(s => {
+      const allIds = s.batchIds?.length ? s.batchIds : s.batchId ? [s.batchId] : [];
+      return {
+        ...s,
+        batches: allIds
+          .filter(id => batchMap[id?.toString()])
+          .map(id => batchMap[id?.toString()]),
+      };
+    });
 
     res.json({ success: true, data });
   } catch (error) {

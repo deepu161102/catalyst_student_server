@@ -127,10 +127,13 @@ const searchUsers = async (req, res) => {
 
     if (role === 'student') {
       // Student → return all their assigned mentors (one per batch)
-      const student = await Student.findById(currentUserId).select('batchIds').lean();
-      if (!student?.batchIds?.length) return res.json({ success: true, data: [] });
+      const student = await Student.findById(currentUserId).select('batchIds batchId').lean();
+      const ids = student?.batchIds?.length ? student.batchIds
+                : student?.batchId          ? [student.batchId]
+                : [];
+      if (!ids.length) return res.json({ success: true, data: [] });
 
-      const batches = await Batch.find({ _id: { $in: student.batchIds } }).select('mentorId').lean();
+      const batches = await Batch.find({ _id: { $in: ids } }).select('mentorId').lean();
       const mentorIds = [...new Set(batches.map(b => b.mentorId?.toString()).filter(Boolean))];
       if (!mentorIds.length) return res.json({ success: true, data: [] });
 
@@ -146,11 +149,12 @@ const searchUsers = async (req, res) => {
 
     if (!batchIds.length) return res.json({ success: true, data: [] });
 
-    // Step 2: students in any of those batches (batchIds is now an array on Student)
+    // Step 2: students in any of those batches — support both old batchId and new batchIds
+    const batchFilter = { $or: [{ batchIds: { $in: batchIds } }, { batchId: { $in: batchIds } }] };
     const users = await Student
-      .find({ batchIds: { $in: batchIds }, ...textFilter })
+      .find(q ? { $and: [batchFilter, textFilter] } : batchFilter)
       .limit(50)
-      .select('name email batchIds')
+      .select('name email batchIds batchId')
       .lean();
 
     res.json({ success: true, data: users });

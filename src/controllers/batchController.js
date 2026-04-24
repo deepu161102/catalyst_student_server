@@ -9,7 +9,10 @@ const STUDENT_COUNT_STAGE = {
     from: 'students',
     let:  { batchId: '$_id' },
     pipeline: [
-      { $match: { $expr: { $in: ['$$batchId', { $ifNull: ['$batchIds', []] }] } } },
+      { $match: { $expr: { $or: [
+        { $in: ['$$batchId', { $ifNull: ['$batchIds', []] }] },
+        { $eq: ['$$batchId', '$batchId'] },
+      ] } } },
       { $count: 'n' },
     ],
     as: 'studentCountArr',
@@ -76,8 +79,8 @@ const getBatchById = async (req, res) => {
         },
         PROJECT_BATCH,
       ]),
-      Student.find({ batchIds: batchId })
-        .select('name email phone progress totalSessions completedSessions isActive enrollmentDate batchIds')
+      Student.find({ $or: [{ batchIds: batchId }, { batchId }] })
+        .select('name email phone progress totalSessions completedSessions isActive enrollmentDate batchIds batchId')
         .lean(),
     ]);
 
@@ -119,7 +122,7 @@ const updateBatch = async (req, res) => {
 const deleteBatch = async (req, res) => {
   try {
     const batchObjId = new mongoose.Types.ObjectId(req.params.id);
-    const count = await Student.countDocuments({ batchIds: batchObjId });
+    const count = await Student.countDocuments({ $or: [{ batchIds: batchObjId }, { batchId: batchObjId }] });
     if (count > 0) {
       return res.status(400).json({
         success: false,
