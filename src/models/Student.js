@@ -9,8 +9,8 @@ const studentSchema = new mongoose.Schema(
     password:          { type: String, select: false },
     phone:             { type: String },
     enrollmentDate:    { type: String },
-    // Batch is the source of truth for course + mentor. batchId is the FK.
-    batchId:           { type: mongoose.Schema.Types.ObjectId, ref: 'Batch', default: null },
+    // A student can be enrolled in multiple batches (one per subject/mentor)
+    batchIds:          [{ type: mongoose.Schema.Types.ObjectId, ref: 'Batch' }],
     // Student-level progress (owned by student, not batch)
     progress:          { type: Number, default: 0 },
     totalSessions:     { type: Number, default: 0 },
@@ -21,10 +21,7 @@ const studentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ── Indexes ───────────────────────────────────────────────────────────────────
-// Primary: "all students in batch X" (used by mentor portal, chat, ops)
-studentSchema.index({ batchId: 1 });
-// Filtered: "active students in batch X" — covers batchId-only queries too
-studentSchema.index({ batchId: 1, isActive: 1 });
+studentSchema.index({ batchIds: 1 });
+studentSchema.index({ batchIds: 1, isActive: 1 });
 
 module.exports = mongoose.model('Student', studentSchema);
