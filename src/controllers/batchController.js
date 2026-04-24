@@ -9,7 +9,7 @@ const STUDENT_COUNT_STAGE = {
     from: 'students',
     let:  { batchId: '$_id' },
     pipeline: [
-      { $match: { $expr: { $in: ['$$batchId', '$batchIds'] } } },
+      { $match: { $expr: { $in: ['$$batchId', { $ifNull: ['$batchIds', []] }] } } },
       { $count: 'n' },
     ],
     as: 'studentCountArr',
