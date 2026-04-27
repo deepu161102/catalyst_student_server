@@ -1,17 +1,14 @@
 const express = require('express');
 const router  = express.Router();
 const {
-  startAssignment,
-  submitModule,
-  submitAssignment,
-  getStudentResponse,
-  getAssignmentResponses,
+  getResponses,
+  getResponseById,
+  createResponse,
+  updateResponse,
+  deleteResponse,
 } = require('../controllers/assignmentResponseController');
 
-router.post('/start', startAssignment);
-router.patch('/:id/module', submitModule);
-router.patch('/:id/submit', submitAssignment);
-router.get('/student/:studentId/assignment/:assignmentId', getStudentResponse);
-router.get('/assignment/:assignmentId', getAssignmentResponses);
+router.route('/').get(getResponses).post(createResponse);
+router.route('/:id').get(getResponseById).put(updateResponse).delete(deleteResponse);
 
 module.exports = router;
