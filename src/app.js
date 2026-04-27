@@ -31,11 +31,13 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' });
 });
 
-app.use('/api/auth',     require('./routes/authRoutes'));
-app.use('/api/students', require('./routes/studentRoutes'));
-app.use('/api/mentors',  require('./routes/mentorRoutes'));
-app.use('/api/batches',  require('./routes/batchRoutes'));
-app.use('/api/chat',     require('./routes/chatRoutes'));
+app.use('/api/auth',                  require('./routes/authRoutes'));
+app.use('/api/students',             require('./routes/studentRoutes'));
+app.use('/api/mentors',              require('./routes/mentorRoutes'));
+app.use('/api/batches',              require('./routes/batchRoutes'));
+app.use('/api/chat',                 require('./routes/chatRoutes'));
+app.use('/api/assignments',          require('./routes/assignmentRoutes'));
+app.use('/api/assignment-responses', require('./routes/assignmentResponseRoutes'));
 
 app.use(notFound);
 app.use(errorHandler);

@@ -126,16 +126,20 @@ const searchUsers = async (req, res) => {
       : {};
 
     if (role === 'student') {
-      // Student → return only their assigned mentor (1 result max)
-      const student = await Student.findById(currentUserId).select('batchId').lean();
-      if (!student?.batchId) return res.json({ success: true, data: [] });
+      // Student → return all their assigned mentors (one per batch)
+      const student = await Student.findById(currentUserId).select('batchIds batchId').lean();
+      const ids = student?.batchIds?.length ? student.batchIds
+                : student?.batchId          ? [student.batchId]
+                : [];
+      if (!ids.length) return res.json({ success: true, data: [] });
 
-      const batch = await Batch.findById(student.batchId).select('mentorId').lean();
-      if (!batch?.mentorId) return res.json({ success: true, data: [] });
+      const batches = await Batch.find({ _id: { $in: ids } }).select('mentorId').lean();
+      const mentorIds = [...new Set(batches.map(b => b.mentorId?.toString()).filter(Boolean))];
+      if (!mentorIds.length) return res.json({ success: true, data: [] });
 
-      const mentor = await Mentor.findOne({ _id: batch.mentorId, ...textFilter })
+      const mentors = await Mentor.find({ _id: { $in: mentorIds }, ...textFilter })
         .select('name email').lean();
-      return res.json({ success: true, data: mentor ? [mentor] : [] });
+      return res.json({ success: true, data: mentors });
     }
 
     // Mentor/Operations → return only students in their batches
@@ -145,11 +149,12 @@ const searchUsers = async (req, res) => {
 
     if (!batchIds.length) return res.json({ success: true, data: [] });
 
-    // Step 2: students in those batches (uses batchId index on Student)
+    // Step 2: students in any of those batches — support both old batchId and new batchIds
+    const batchFilter = { $or: [{ batchIds: { $in: batchIds } }, { batchId: { $in: batchIds } }] };
     const users = await Student
-      .find({ batchId: { $in: batchIds }, ...textFilter })
+      .find(q ? { $and: [batchFilter, textFilter] } : batchFilter)
       .limit(50)
-      .select('name email batchId')
+      .select('name email batchIds batchId')
       .lean();
 
     res.json({ success: true, data: users });

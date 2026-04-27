@@ -3,17 +3,16 @@ const Batch   = require('../models/Batch');
 const Student = require('../models/Student');
 const Mentor  = require('../models/Mentor');
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-// Shared aggregation stages used in list + detail queries.
-// Uses a sub-pipeline $lookup so we only COUNT students, never pull their documents
-// into memory — the batchId index on Student makes the count O(students_in_batch).
+// Count students enrolled in a batch — batchIds is an array on Student
 const STUDENT_COUNT_STAGE = {
   $lookup: {
     from: 'students',
     let:  { batchId: '$_id' },
     pipeline: [
-      { $match: { $expr: { $eq: ['$batchId', '$$batchId'] } } },
+      { $match: { $expr: { $or: [
+        { $in: ['$$batchId', { $ifNull: ['$batchIds', []] }] },
+        { $eq: ['$$batchId', '$batchId'] },
+      ] } } },
       { $count: 'n' },
     ],
     as: 'studentCountArr',
@@ -28,8 +27,6 @@ const PROJECT_BATCH = {
 };
 
 // ── GET /api/batches ──────────────────────────────────────────────────────────
-// List all batches with mentor name + student count.
-// Optional query: ?status=active  ?mentorId=<id>
 const getAllBatches = async (req, res) => {
   try {
     const match = {};
@@ -38,17 +35,12 @@ const getAllBatches = async (req, res) => {
 
     const batches = await Batch.aggregate([
       { $match: match },
-      // Mentor name — single-doc lookup by _id (always fast)
       {
         $lookup: {
-          from:         'mentors',
-          localField:   'mentorId',
-          foreignField: '_id',
-          as:           'mentor',
+          from: 'mentors', localField: 'mentorId', foreignField: '_id', as: 'mentor',
         },
       },
       { $unwind: { path: '$mentor', preserveNullAndEmptyArrays: true } },
-      // Student count via sub-pipeline (no array explosion)
       STUDENT_COUNT_STAGE,
       {
         $addFields: {
@@ -66,7 +58,6 @@ const getAllBatches = async (req, res) => {
 };
 
 // ── GET /api/batches/:id ──────────────────────────────────────────────────────
-// Single batch with full student list (name + email + progress only).
 const getBatchById = async (req, res) => {
   try {
     const batchId = new mongoose.Types.ObjectId(req.params.id);
@@ -88,9 +79,8 @@ const getBatchById = async (req, res) => {
         },
         PROJECT_BATCH,
       ]),
-      // Students fetched separately — uses the batchId index
-      Student.find({ batchId })
-        .select('name email phone progress totalSessions completedSessions isActive enrollmentDate')
+      Student.find({ $or: [{ batchIds: batchId }, { batchId }] })
+        .select('name email phone progress totalSessions completedSessions isActive enrollmentDate batchIds batchId')
         .lean(),
     ]);
 
@@ -117,9 +107,7 @@ const createBatch = async (req, res) => {
 // ── PUT /api/batches/:id ──────────────────────────────────────────────────────
 const updateBatch = async (req, res) => {
   try {
-    // Prevent accidental overwrite of computed fields
     delete req.body.studentCount;
-
     const batch = await Batch.findByIdAndUpdate(req.params.id, req.body, {
       new: true, runValidators: true,
     });
@@ -131,10 +119,10 @@ const updateBatch = async (req, res) => {
 };
 
 // ── DELETE /api/batches/:id ───────────────────────────────────────────────────
-// Refuses deletion if students are still enrolled.
 const deleteBatch = async (req, res) => {
   try {
-    const count = await Student.countDocuments({ batchId: req.params.id });
+    const batchObjId = new mongoose.Types.ObjectId(req.params.id);
+    const count = await Student.countDocuments({ $or: [{ batchIds: batchObjId }, { batchId: batchObjId }] });
     if (count > 0) {
       return res.status(400).json({
         success: false,
@@ -150,7 +138,7 @@ const deleteBatch = async (req, res) => {
 };
 
 // ── POST /api/batches/:id/students ────────────────────────────────────────────
-// Enroll a student in this batch (sets student.batchId).
+// Enroll a student in this batch — uses $addToSet so no duplicates
 const addStudentToBatch = async (req, res) => {
   try {
     const { studentId } = req.body;
@@ -161,9 +149,9 @@ const addStudentToBatch = async (req, res) => {
 
     const student = await Student.findByIdAndUpdate(
       studentId,
-      { batchId: batch._id },
+      { $addToSet: { batchIds: batch._id } },
       { new: true }
-    ).select('name email batchId');
+    ).select('name email batchIds');
 
     if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
 
@@ -174,24 +162,24 @@ const addStudentToBatch = async (req, res) => {
 };
 
 // ── DELETE /api/batches/:id/students/:studentId ───────────────────────────────
-// Remove a student from this batch (clears student.batchId).
+// Remove student from this specific batch only — they stay in other batches
 const removeStudentFromBatch = async (req, res) => {
   try {
-    const student = await Student.findOneAndUpdate(
-      { _id: req.params.studentId, batchId: req.params.id },
-      { batchId: null },
+    const batchObjId = new mongoose.Types.ObjectId(req.params.id);
+    const student = await Student.findByIdAndUpdate(
+      req.params.studentId,
+      { $pull: { batchIds: batchObjId } },
       { new: true }
-    ).select('name email batchId');
+    ).select('name email batchIds');
 
-    if (!student) return res.status(404).json({ success: false, message: 'Student not found in this batch' });
+    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
     res.json({ success: true, data: student });
   } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ── GET /api/mentors ──────────────────────────────────────────────────────────
-// List all mentors (used by ops portal for dropdowns).
 const getAllMentors = async (req, res) => {
   try {
     const mentors = await Mentor.find().select('name email specialization role isActive').lean();

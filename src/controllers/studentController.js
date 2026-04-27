@@ -9,7 +9,7 @@ const getAllStudents = async (req, res) => {
   try {
     const students = await Student.find()
       .populate({
-        path:     'batchId',
+        path:     'batchIds',
         select:   'name course mentorId',
         populate: { path: 'mentorId', select: 'name email' },
       })
@@ -25,7 +25,7 @@ const getStudentById = async (req, res) => {
   try {
     const student = await Student.findById(req.params.id)
       .populate({
-        path:     'batchId',
+        path:     'batchIds',
         select:   'name course mentorId status totalSessions completedSessions',
         populate: { path: 'mentorId', select: 'name email specialization' },
       })
@@ -38,26 +38,31 @@ const getStudentById = async (req, res) => {
 };
 
 // GET /api/students/:id/mentor
-// Returns the mentor + batch info for a student — used by student portal profile/sidebar.
+// Returns all {mentor, batch} pairs for a student — used by student portal profile/sidebar.
 const getStudentMentor = async (req, res) => {
   try {
-    const student = await Student.findById(req.params.id).select('batchId').lean();
-    if (!student?.batchId) return res.json({ success: true, data: null });
+    const student = await Student.findById(req.params.id).select('batchIds batchId').lean();
 
-    const batch = await Batch.findById(student.batchId)
+    // Support legacy batchId (single) while batchIds (array) hasn't been migrated yet
+    const ids = student?.batchIds?.length ? student.batchIds
+              : student?.batchId           ? [student.batchId]
+              : [];
+
+    if (!ids.length) return res.json({ success: true, data: [] });
+
+    const batches = await Batch.find({ _id: { $in: ids } })
       .populate('mentorId', 'name email specialization phone')
       .select('name course mentorId startDate endDate status')
       .lean();
 
-    if (!batch) return res.json({ success: true, data: null });
+    const data = batches
+      .filter(b => b.mentorId)
+      .map(b => ({
+        mentor: b.mentorId,
+        batch:  { _id: b._id, name: b.name, course: b.course, startDate: b.startDate, endDate: b.endDate, status: b.status },
+      }));
 
-    res.json({
-      success: true,
-      data: {
-        mentor: batch.mentorId,
-        batch:  { _id: batch._id, name: batch.name, course: batch.course, startDate: batch.startDate, endDate: batch.endDate, status: batch.status },
-      },
-    });
+    res.json({ success: true, data });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -76,18 +81,23 @@ const getStudentsByMentor = async (req, res) => {
 
     if (!batchIds.length) return res.json({ success: true, data: [] });
 
-    // Step 2: students in those batches (indexed on batchId)
+    // Step 2: students in any of those batches — support both old batchId and new batchIds
     const batchMap = Object.fromEntries(batches.map(b => [b._id.toString(), b]));
     const students = await Student
-      .find({ batchId: { $in: batchIds } })
-      .select('name email phone progress totalSessions completedSessions batchId enrollmentDate isActive')
+      .find({ $or: [{ batchIds: { $in: batchIds } }, { batchId: { $in: batchIds } }] })
+      .select('name email phone progress totalSessions completedSessions batchIds batchId enrollmentDate isActive')
       .lean();
 
-    // Attach batch info inline so the client doesn't need a second request
-    const data = students.map(s => ({
-      ...s,
-      batch: batchMap[s.batchId?.toString()] || null,
-    }));
+    // Attach only the batches belonging to this mentor
+    const data = students.map(s => {
+      const allIds = s.batchIds?.length ? s.batchIds : s.batchId ? [s.batchId] : [];
+      return {
+        ...s,
+        batches: allIds
+          .filter(id => batchMap[id?.toString()])
+          .map(id => batchMap[id?.toString()]),
+      };
+    });
 
     res.json({ success: true, data });
   } catch (error) {
