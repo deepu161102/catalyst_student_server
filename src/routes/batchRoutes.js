@@ -7,14 +7,16 @@ const {
   createBatch,
   updateBatch,
   deleteBatch,
-  addStudentToBatch,
-  removeStudentFromBatch,
+  getBatchesByStudent,
   getAllMentors,
+  getAllStudentsForOps,
 } = require('../controllers/batchController');
 
 router.use(protect);
 
-router.get('/mentors', getAllMentors);          // ops dropdown — list all mentors
+router.get('/mentors',              getAllMentors);        // ops dropdown — list all mentors
+router.get('/students',             getAllStudentsForOps); // ops dropdown — list all students
+router.get('/by-student/:studentId', getBatchesByStudent); // student portal — all batches + mentors
 
 router.route('/')
   .get(getAllBatches)
@@ -24,8 +26,5 @@ router.route('/:id')
   .get(getBatchById)
   .put(updateBatch)
   .delete(deleteBatch);
-
-router.post('/:id/students',                    addStudentToBatch);
-router.delete('/:id/students/:studentId',       removeStudentFromBatch);
 
 module.exports = router;

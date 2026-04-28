@@ -127,13 +127,7 @@ const searchUsers = async (req, res) => {
 
     if (role === 'student') {
       // Student → return all their assigned mentors (one per batch)
-      const student = await Student.findById(currentUserId).select('batchIds batchId').lean();
-      const ids = student?.batchIds?.length ? student.batchIds
-                : student?.batchId          ? [student.batchId]
-                : [];
-      if (!ids.length) return res.json({ success: true, data: [] });
-
-      const batches = await Batch.find({ _id: { $in: ids } }).select('mentorId').lean();
+      const batches = await Batch.find({ studentId: currentUserId }).select('mentorId').lean();
       const mentorIds = [...new Set(batches.map(b => b.mentorId?.toString()).filter(Boolean))];
       if (!mentorIds.length) return res.json({ success: true, data: [] });
 
@@ -143,18 +137,15 @@ const searchUsers = async (req, res) => {
     }
 
     // Mentor/Operations → return only students in their batches
-    // Step 1: mentor's batch IDs (uses mentorId index on Batch)
-    const batches  = await Batch.find({ mentorId: currentUserId }).select('_id').lean();
-    const batchIds = batches.map(b => b._id);
+    const batches    = await Batch.find({ mentorId: currentUserId }).select('studentId').lean();
+    const studentIds = [...new Set(batches.map(b => b.studentId?.toString()).filter(Boolean))];
 
-    if (!batchIds.length) return res.json({ success: true, data: [] });
+    if (!studentIds.length) return res.json({ success: true, data: [] });
 
-    // Step 2: students in any of those batches — support both old batchId and new batchIds
-    const batchFilter = { $or: [{ batchIds: { $in: batchIds } }, { batchId: { $in: batchIds } }] };
     const users = await Student
-      .find(q ? { $and: [batchFilter, textFilter] } : batchFilter)
+      .find(q ? { $and: [{ _id: { $in: studentIds } }, textFilter] } : { _id: { $in: studentIds } })
       .limit(50)
-      .select('name email batchIds batchId')
+      .select('name email')
       .lean();
 
     res.json({ success: true, data: users });

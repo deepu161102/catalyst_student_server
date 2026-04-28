@@ -1,14 +1,24 @@
 const express = require('express');
 const router  = express.Router();
+const protect = require('../middleware/auth');
 const {
   getResponses,
   getResponseById,
-  createResponse,
-  updateResponse,
+  startAssignment,
+  submitAssignment,
   deleteResponse,
 } = require('../controllers/assignmentResponseController');
 
-router.route('/').get(getResponses).post(createResponse);
-router.route('/:id').get(getResponseById).put(updateResponse).delete(deleteResponse);
+router.use(protect);
+
+router.route('/')
+  .get(getResponses)
+  .post(startAssignment);           // student starts test → creates in_progress response
+
+router.route('/:id')
+  .get(getResponseById)
+  .delete(deleteResponse);
+
+router.post('/:id/submit', submitAssignment); // student submits answers → auto-scored
 
 module.exports = router;
