@@ -27,7 +27,7 @@ const login = async (req, res) => {
 
     // Try Student → Mentor → Operations
     let user = await Student.findOne({ email: normalizedEmail }).select('+password');
-    let role = 'student';
+    let role = user?.accountType === 'guest' ? 'guest' : 'student';
 
     if (!user) {
       user = await Mentor.findOne({ email: normalizedEmail }).select('+password');
@@ -58,13 +58,67 @@ const login = async (req, res) => {
   }
 };
 
+// POST /api/auth/guest-signup
+const guestSignup = async (req, res) => {
+  try {
+    const { name, email, password, phone, grade, targetYear, city, parentName, parentPhone } = req.body;
+
+    if (!name?.trim())  return res.status(400).json({ success: false, message: 'Name is required' });
+    if (!email?.trim()) return res.status(400).json({ success: false, message: 'Email is required' });
+    if (!password)      return res.status(400).json({ success: false, message: 'Password is required' });
+    if (!phone?.trim()) return res.status(400).json({ success: false, message: 'Phone number is required' });
+    if (!grade?.trim()) return res.status(400).json({ success: false, message: 'Grade is required' });
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // If email already exists as a guest, don't create duplicate — just log them in
+    const existing = await Student.findOne({ email: normalizedEmail }).select('+password');
+    if (existing) {
+      if (existing.accountType === 'student') {
+        return res.status(400).json({ success: false, message: 'An account with this email already exists. Please sign in.' });
+      }
+      // Already a guest — treat as re-registration attempt, just sign them in
+      const token = signToken(existing._id, 'guest');
+      res.cookie('token', token, COOKIE_OPTS);
+      const { password: _p, ...rest } = existing.toObject();
+      return res.json({ success: true, token, data: { ...rest, role: 'guest' } });
+    }
+
+    const hashed  = await bcrypt.hash(password, 12);
+    const student = await Student.create({
+      name:        name.trim(),
+      email:       normalizedEmail,
+      password:    hashed,
+      phone,
+      grade,
+      targetYear,
+      city,
+      parentName,
+      parentPhone,
+      accountType: 'guest',
+      isActive:    false,
+    });
+
+    const token = signToken(student._id, 'guest');
+    res.cookie('token', token, COOKIE_OPTS);
+
+    const { password: _p, ...studentData } = student.toObject();
+    res.status(201).json({ success: true, token, data: { ...studentData, role: 'guest' } });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ success: false, message: 'An account with this email already exists.' });
+    }
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // POST /api/auth/logout
 const logout = (_req, res) => {
   res.clearCookie('token', COOKIE_OPTS);
   res.json({ success: true, message: 'Logged out' });
 };
 
-const getModel = (role) => role === 'student' ? Student : role === 'mentor' ? Mentor : Operations;
+const getModel = (role) => (role === 'mentor' ? Mentor : role === 'operations' ? Operations : Student);
 
 // GET /api/auth/me
 const getMe = async (req, res) => {
@@ -97,4 +151,4 @@ const updateMe = async (req, res) => {
   }
 };
 
-module.exports = { login, logout, getMe, updateMe };
+module.exports = { login, guestSignup, logout, getMe, updateMe };

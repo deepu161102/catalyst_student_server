@@ -2,6 +2,7 @@ const Assignment         = require('../models/Assignment');
 const AssignmentResponse = require('../models/AssignmentResponse');
 const Batch              = require('../models/Batch');
 const Mentor             = require('../models/Mentor');
+const Student            = require('../models/Student');
 
 const MENTOR_SELECT = 'name email specialization';
 const BATCH_SELECT  = 'name subject status mentorId studentId';
@@ -11,6 +12,8 @@ const getAssignments = async (req, res) => {
   try {
     const filter = { isActive: true };
     if (req.query.mentorId)  filter.mentorId  = req.query.mentorId;
+    if (req.query.opsId)     filter.opsId     = req.query.opsId;
+    if (req.query.ownedBy)   filter.ownedBy   = req.query.ownedBy;
     if (req.query.status)    filter.status    = req.query.status;
     if (req.query.batchId)   filter.enrolledBatches = req.query.batchId;
 
@@ -63,14 +66,20 @@ const getAssignmentForStudent = async (req, res) => {
 // ── POST /api/assignments ─────────────────────────────────────────────────────
 const createAssignment = async (req, res) => {
   try {
-    const { mentorId } = req.body;
-    if (!mentorId) return res.status(400).json({ success: false, message: 'mentorId is required' });
+    const { mentorId, ownedBy, opsId } = req.body;
 
-    const mentor = await Mentor.findById(mentorId);
-    if (!mentor) return res.status(404).json({ success: false, message: 'Mentor not found' });
+    if (ownedBy === 'ops') {
+      if (!opsId) return res.status(400).json({ success: false, message: 'opsId is required for ops assignments' });
+    } else {
+      if (!mentorId) return res.status(400).json({ success: false, message: 'mentorId is required' });
+      const mentor = await Mentor.findById(mentorId);
+      if (!mentor) return res.status(404).json({ success: false, message: 'Mentor not found' });
+    }
 
     const assignment = await Assignment.create(req.body);
-    await assignment.populate('mentorId', MENTOR_SELECT);
+    if (ownedBy !== 'ops' && assignment.mentorId) {
+      await assignment.populate('mentorId', MENTOR_SELECT);
+    }
 
     res.status(201).json({ success: true, data: assignment });
   } catch (error) {
@@ -127,13 +136,15 @@ const enrollBatches = async (req, res) => {
     const assignment = await Assignment.findById(req.params.id);
     if (!assignment) return res.status(404).json({ success: false, message: 'Assignment not found' });
 
-    const validBatches = await Batch.find({
-      _id:      { $in: batchIds },
-      mentorId: assignment.mentorId,
-    }).select('_id');
+    if (assignment.ownedBy !== 'ops') {
+      const validBatches = await Batch.find({
+        _id:      { $in: batchIds },
+        mentorId: assignment.mentorId,
+      }).select('_id');
 
-    if (validBatches.length !== batchIds.length) {
-      return res.status(400).json({ success: false, message: 'One or more batches are invalid or do not belong to this mentor' });
+      if (validBatches.length !== batchIds.length) {
+        return res.status(400).json({ success: false, message: 'One or more batches are invalid or do not belong to this mentor' });
+      }
     }
 
     const updated = await Assignment.findByIdAndUpdate(
@@ -183,6 +194,31 @@ const deleteAssignment = async (req, res) => {
   }
 };
 
+// ── GET /api/assignments/guest ────────────────────────────────────────────────
+// Guest portal: only assignments explicitly marked isGuestAccessible.
+const getGuestAssignments = async (req, res) => {
+  try {
+    const assignments = await Assignment.find({
+      isGuestAccessible: true,
+      status:            'published',
+      isActive:          true,
+    })
+      .populate('mentorId', 'name email')
+      .select('-sections.modules.questions.correctAnswer -sections.modules.questions.explanation')
+      .sort({ assignmentType: 1, createdAt: -1 })
+      .lean();
+
+    const data = assignments.map(({ mentorId, opsId, ownedBy, ...rest }) => ({
+      ...rest,
+      ownedBy,
+      createdBy: ownedBy === 'ops' ? opsId : mentorId,
+    }));
+    res.json({ success: true, count: data.length, data });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ── GET /api/assignments/batch/:batchId ───────────────────────────────────────
 // Student portal: published assignments for a batch, without correct answers.
 const getBatchAssignments = async (req, res) => {
@@ -205,7 +241,8 @@ const getBatchAssignments = async (req, res) => {
 };
 
 // ── GET /api/assignments/:id/progress ────────────────────────────────────────
-// Mentor: full assignment (with answers) + per-student attempt summary.
+// Returns full assignment + per-student attempt summary.
+// For ops assignments (no batches): builds attempts directly from responses.
 const getAssignmentProgress = async (req, res) => {
   try {
     const [assignment, responses] = await Promise.all([
@@ -221,7 +258,6 @@ const getAssignmentProgress = async (req, res) => {
 
     if (!assignment) return res.status(404).json({ success: false, message: 'Assignment not found' });
 
-    // Build per-module maxScore from assignment structure
     const moduleMaxScore = {};
     for (const s of assignment.sections) {
       for (const m of s.modules) {
@@ -229,48 +265,76 @@ const getAssignmentProgress = async (req, res) => {
       }
     }
 
-    // Index responses by studentId
-    const responseMap = {};
-    for (const r of responses) {
-      const sid = r.studentId?.toString();
-      if (sid) responseMap[sid] = r;
-    }
-
-    const attempts = [];
-    for (const batch of (assignment.enrolledBatches || [])) {
-      const student = batch.studentId;
-      if (!student) continue;
-      const sid      = (student._id || student).toString();
-      const response = responseMap[sid];
-
-      attempts.push({
-        studentId:    student._id,
-        studentName:  student.name,
-        studentEmail: student.email,
-        batchId:      batch._id,
-        batchName:    batch.name,
-        status:       response
-          ? (response.status === 'submitted' ? 'completed' : response.status)
-          : 'not_started',
-        score:        response?.overallScore ?? null,
-        maxScore:     response?.maxScore     ?? null,
-        percentage:   response?.percentage   ?? null,
-        passed:       response?.passed       ?? null,
-        completedAt:  response?.submittedAt  ?? null,
-        sectionResults: (response?.sectionResponses || []).map(sr => ({
-          sectionId:   sr.sid,
-          sectionName: sr.sid === 'rw' ? 'Reading and Writing' : 'Math',
-          modules: (sr.moduleResponses || []).map(mr => ({
-            moduleNumber:   mr.moduleNumber,
-            score:          mr.score,
-            maxScore:       moduleMaxScore[mr.mid] ?? mr.totalQuestions,
-            correctAnswers: mr.correctAnswers,
-            totalQuestions: mr.totalQuestions,
-            timeTaken:      null,
-            answers:        Object.fromEntries((mr.answers || []).map(a => [a.qid, a.selected])),
-          })),
+    const buildSectionResults = (response) =>
+      (response?.sectionResponses || []).map((sr) => ({
+        sectionId:   sr.sid,
+        sectionName: sr.sid === 'rw' ? 'Reading and Writing' : 'Math',
+        modules: (sr.moduleResponses || []).map((mr) => ({
+          moduleNumber:   mr.moduleNumber,
+          score:          mr.score,
+          maxScore:       moduleMaxScore[mr.mid] ?? mr.totalQuestions,
+          correctAnswers: mr.correctAnswers,
+          totalQuestions: mr.totalQuestions,
+          timeTaken:      null,
+          answers:        Object.fromEntries((mr.answers || []).map((a) => [a.qid, a.selected])),
         })),
-      });
+      }));
+
+    let attempts = [];
+
+    if (assignment.ownedBy === 'ops') {
+      const studentIds = responses.map((r) => r.studentId).filter(Boolean);
+      const students   = await Student.find({ _id: { $in: studentIds } }).select('name email').lean();
+      const studentMap = Object.fromEntries(students.map((s) => [s._id.toString(), s]));
+
+      for (const response of responses) {
+        const sid     = response.studentId?.toString();
+        const student = studentMap[sid] || {};
+        attempts.push({
+          studentId:    response.studentId,
+          studentName:  student.name  || 'Guest',
+          studentEmail: student.email || '',
+          batchId:      null,
+          batchName:    'Explore Test',
+          status:       response.status === 'submitted' ? 'completed' : response.status,
+          score:        response.overallScore ?? null,
+          maxScore:     response.maxScore     ?? null,
+          percentage:   response.percentage   ?? null,
+          passed:       response.passed       ?? null,
+          completedAt:  response.submittedAt  ?? null,
+          sectionResults: buildSectionResults(response),
+        });
+      }
+    } else {
+      const responseMap = {};
+      for (const r of responses) {
+        const sid = r.studentId?.toString();
+        if (sid) responseMap[sid] = r;
+      }
+
+      for (const batch of (assignment.enrolledBatches || [])) {
+        const student = batch.studentId;
+        if (!student) continue;
+        const sid      = (student._id || student).toString();
+        const response = responseMap[sid];
+
+        attempts.push({
+          studentId:    student._id,
+          studentName:  student.name,
+          studentEmail: student.email,
+          batchId:      batch._id,
+          batchName:    batch.name,
+          status:       response
+            ? (response.status === 'submitted' ? 'completed' : response.status)
+            : 'not_started',
+          score:        response?.overallScore ?? null,
+          maxScore:     response?.maxScore     ?? null,
+          percentage:   response?.percentage   ?? null,
+          passed:       response?.passed       ?? null,
+          completedAt:  response?.submittedAt  ?? null,
+          sectionResults: buildSectionResults(response),
+        });
+      }
     }
 
     res.json({ success: true, data: { ...assignment, attempts } });
@@ -289,6 +353,7 @@ module.exports = {
   enrollBatches,
   unenrollBatch,
   deleteAssignment,
+  getGuestAssignments,
   getBatchAssignments,
   getAssignmentProgress,
 };

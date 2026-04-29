@@ -47,9 +47,8 @@ const startAssignment = async (req, res) => {
     const { assignmentId, studentId, batchId } = req.body;
     if (!assignmentId) return res.status(400).json({ success: false, message: 'assignmentId is required' });
     if (!studentId)    return res.status(400).json({ success: false, message: 'studentId is required' });
-    if (!batchId)      return res.status(400).json({ success: false, message: 'batchId is required' });
 
-    const assignment = await Assignment.findById(assignmentId);
+    const assignment = await Assignment.findById(assignmentId).select('status').lean();
     if (!assignment) return res.status(404).json({ success: false, message: 'Assignment not found' });
     if (assignment.status !== 'published') {
       return res.status(403).json({ success: false, message: 'Assignment is not published' });
@@ -77,7 +76,10 @@ const submitAssignment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Assignment already submitted' });
     }
 
-    const assignment = await Assignment.findById(response.assignmentId).lean();
+    // Only load scoring-relevant fields — avoids fetching large base64 image descriptions
+    const assignment = await Assignment.findById(response.assignmentId)
+      .select('passingScore sections.sid sections.name sections.modules.mid sections.modules.number sections.modules.questions.qid sections.modules.questions.correctAnswer sections.modules.questions.score sections.modules.questions.topic')
+      .lean();
     if (!assignment) return res.status(404).json({ success: false, message: 'Assignment not found' });
 
     const { sectionResponses } = req.body;
@@ -149,7 +151,8 @@ const submitAssignment = async (req, res) => {
       { path: 'studentId',    select: 'name email' },
     ]);
 
-    res.json({ success: true, data: response });
+    // Return assignment sections (with correctAnswer + topic) so client can compute topic mastery
+    res.json({ success: true, data: response, assignmentSections: assignment.sections });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

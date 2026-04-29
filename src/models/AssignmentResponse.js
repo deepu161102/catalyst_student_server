@@ -35,7 +35,7 @@ const assignmentResponseSchema = new mongoose.Schema(
     responseId:      { type: String, unique: true, default: uuidv4 },
     assignmentId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Assignment', required: [true, 'Assignment is required'] },
     studentId:       { type: mongoose.Schema.Types.ObjectId, ref: 'Student',    required: [true, 'Student is required'] },
-    batchId:         { type: mongoose.Schema.Types.ObjectId, ref: 'Batch',      required: [true, 'Batch is required'] },
+    batchId:         { type: mongoose.Schema.Types.ObjectId, ref: 'Batch',      default: null },
     status:          { type: String, enum: ['in_progress', 'submitted'], default: 'in_progress' },
     startedAt:       { type: Date, default: Date.now },
     submittedAt:     { type: Date },

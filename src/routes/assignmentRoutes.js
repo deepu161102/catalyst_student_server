@@ -11,14 +11,18 @@ const {
   enrollBatches,
   unenrollBatch,
   deleteAssignment,
+  getGuestAssignments,
   getBatchAssignments,
   getAssignmentProgress,
 } = require('../controllers/assignmentController');
 
 router.use(protect);
 
-// specific routes before parameterised /:id
-router.get('/batch/:batchId', getBatchAssignments);   // student portal — published by batch
+// Guest-accessible: published assignments marked isGuestAccessible
+router.get('/guest',            getGuestAssignments);
+
+// Paid-student/mentor/ops only
+router.get('/batch/:batchId',   getBatchAssignments);
 
 router.route('/')
   .get(getAssignments)
@@ -29,10 +33,10 @@ router.route('/:id')
   .put(updateAssignment)
   .delete(deleteAssignment);
 
-router.get('/:id/student',   getAssignmentForStudent); // student view — no answers/explanations
-router.get('/:id/progress',  getAssignmentProgress);   // mentor progress view
-router.patch('/:id/status',  updateStatus);            // toggle draft | published
-router.post('/:id/enroll',              enrollBatches);  // add batches after creation
-router.delete('/:id/enroll/:batchId',   unenrollBatch);  // remove a single batch
+router.get('/:id/student',             getAssignmentForStudent);
+router.get('/:id/progress',            getAssignmentProgress);
+router.patch('/:id/status',            updateStatus);
+router.post('/:id/enroll',             enrollBatches);
+router.delete('/:id/enroll/:batchId',  unenrollBatch);
 
 module.exports = router;

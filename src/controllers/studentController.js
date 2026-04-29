@@ -101,10 +101,41 @@ const getStudentsByMentor = async (req, res) => {
 // POST /api/students
 const createStudent = async (req, res) => {
   try {
-    const { password, ...rest } = req.body;
+    const { password, email, ...rest } = req.body;
     if (!password) return res.status(400).json({ success: false, message: 'Password is required' });
+
+    const normalizedEmail = email?.toLowerCase().trim();
+
+    // If a guest account already exists with this email, promote it instead of erroring
+    const existing = await Student.findOne({ email: normalizedEmail });
+    if (existing) {
+      if (existing.accountType === 'guest') {
+        const hashed  = await bcrypt.hash(password, 12);
+        const updated = await Student.findByIdAndUpdate(
+          existing._id,
+          {
+            ...rest,
+            password:       hashed,
+            accountType:    'student',
+            isActive:       true,
+            enrollmentDate: new Date().toISOString().split('T')[0],
+          },
+          { new: true, runValidators: true }
+        );
+        const { password: _p, ...studentData } = updated.toObject();
+        return res.status(201).json({ success: true, data: studentData, promoted: true });
+      }
+      return res.status(400).json({ success: false, message: 'Email already exists. Please use a different one.' });
+    }
+
     const hashed  = await bcrypt.hash(password, 12);
-    const student = await Student.create({ ...rest, password: hashed, enrollmentDate: new Date().toISOString().split('T')[0] });
+    const student = await Student.create({
+      ...rest,
+      email:          normalizedEmail,
+      password:       hashed,
+      accountType:    'student',
+      enrollmentDate: new Date().toISOString().split('T')[0],
+    });
     const { password: _p, ...studentData } = student.toObject();
     res.status(201).json({ success: true, data: studentData });
   } catch (error) {
@@ -112,6 +143,30 @@ const createStudent = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email already exists. Please use a different one.' });
     }
     res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/students/:id/grant-access
+const grantAccess = async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
+    if (student.accountType === 'student' && student.isActive) {
+      return res.status(400).json({ success: false, message: 'Student already has full access' });
+    }
+
+    const updated = await Student.findByIdAndUpdate(
+      req.params.id,
+      {
+        accountType:    'student',
+        isActive:       true,
+        enrollmentDate: student.enrollmentDate || new Date().toISOString().split('T')[0],
+      },
+      { new: true }
+    );
+    res.json({ success: true, data: updated });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -147,4 +202,5 @@ module.exports = {
   createStudent,
   updateStudent,
   deleteStudent,
+  grantAccess,
 };
