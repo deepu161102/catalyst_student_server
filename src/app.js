@@ -39,6 +39,10 @@ app.use('/api/chat',                 require('./routes/chatRoutes'));
 app.use('/api/assignments',          require('./routes/assignmentRoutes'));
 app.use('/api/assignment-responses', require('./routes/assignmentResponseRoutes'));
 
+app.use('/api/sat/admin',   require('./routes/sat/satAdminRoutes'));
+app.use('/api/sat/mentor',  require('./routes/sat/satMentorRoutes'));
+app.use('/api/sat/test',    require('./routes/sat/satTestRoutes'));
+
 app.use(notFound);
 app.use(errorHandler);
 

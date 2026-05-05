@@ -20,7 +20,8 @@
       "Bash(node -e ' *)",
       "Bash(git commit --amend -m ' *)",
       "Bash(git push *)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(npm run *)"
     ]
   }
 }

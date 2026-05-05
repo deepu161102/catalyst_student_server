@@ -35,5 +35,19 @@ const requireFullAccess = (req, res, next) => {
   }
 };
 
+const requireOperations = (req, res, next) => {
+  if (req.userRole !== 'operations')
+    return res.status(403).json({ success: false, message: 'Operations access required' });
+  next();
+};
+
+const requireMentor = (req, res, next) => {
+  if (!['mentor', 'operations'].includes(req.userRole))
+    return res.status(403).json({ success: false, message: 'Mentor access required' });
+  next();
+};
+
 module.exports = protect;
 module.exports.requireFullAccess = requireFullAccess;
+module.exports.requireOperations = requireOperations;
+module.exports.requireMentor     = requireMentor;
