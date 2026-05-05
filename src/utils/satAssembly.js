@@ -8,17 +8,50 @@ const shuffle = (arr) => {
   return arr;
 };
 
-// Assembles questions for a module using MongoDB $sample.
-// Throws if the bank has insufficient questions for the requested distribution.
+// Fetches `count` questions of a given difficulty, preferring unseen ones.
+// If the unseen pool is smaller than needed, fills the deficit from seen questions
+// (allowing repeats rather than hard-failing). Returns [] if count is 0.
+const fetchDifficulty = async (base, difficulty, count, excludeIds) => {
+  if (count <= 0) return [];
+
+  const unseenFilter = {
+    ...base,
+    difficulty,
+    ...(excludeIds.length ? { _id: { $nin: excludeIds } } : {}),
+  };
+
+  const unseen = await SatQuestionBank.aggregate([
+    { $match: unseenFilter },
+    { $sample: { size: count } },
+  ]);
+
+  if (unseen.length >= count) return unseen;
+
+  // Not enough unseen — fill deficit from the full active pool, excluding what
+  // we just picked so we don't duplicate within this call.
+  const alreadyPicked = unseen.map((q) => q._id);
+  const deficit       = count - unseen.length;
+
+  const fallback = await SatQuestionBank.aggregate([
+    { $match: { ...base, difficulty, _id: { $nin: alreadyPicked } } },
+    { $sample: { size: deficit } },
+  ]);
+
+  return [...unseen, ...fallback];
+};
+
+// Assembles questions for a module.
+// Prefers questions the student hasn't seen before; falls back to seen ones
+// when the unseen pool runs short. Hard-fails only if the total active bank
+// (ignoring history) doesn't have enough questions of a given difficulty.
 const assembleQuestions = async (subject, moduleConfig, excludeIds = []) => {
   const { easy, medium, hard } = moduleConfig.difficulty_distribution;
   const base = { subject, is_active: true };
-  if (excludeIds.length) base._id = { $nin: excludeIds };
 
   const [easyQs, mediumQs, hardQs] = await Promise.all([
-    easy   > 0 ? SatQuestionBank.aggregate([{ $match: { ...base, difficulty: 'easy'   } }, { $sample: { size: easy   } }]) : [],
-    medium > 0 ? SatQuestionBank.aggregate([{ $match: { ...base, difficulty: 'medium' } }, { $sample: { size: medium } }]) : [],
-    hard   > 0 ? SatQuestionBank.aggregate([{ $match: { ...base, difficulty: 'hard'   } }, { $sample: { size: hard   } }]) : [],
+    fetchDifficulty(base, 'easy',   easy,   excludeIds),
+    fetchDifficulty(base, 'medium', medium, excludeIds),
+    fetchDifficulty(base, 'hard',   hard,   excludeIds),
   ]);
 
   if (easyQs.length < easy || mediumQs.length < medium || hardQs.length < hard) {
