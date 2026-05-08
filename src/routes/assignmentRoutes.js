@@ -5,6 +5,7 @@ const {
   getAssignments,
   getAssignmentById,
   getAssignmentForStudent,
+  getMyAssignments,
   createAssignment,
   updateAssignment,
   updateStatus,
@@ -23,6 +24,7 @@ router.get('/guest',            getGuestAssignments);
 
 // Paid-student/mentor/ops only
 router.get('/batch/:batchId',   getBatchAssignments);
+router.get('/my',               getMyAssignments);
 
 router.route('/')
   .get(getAssignments)

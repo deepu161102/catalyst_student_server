@@ -2,10 +2,12 @@ const SatTestSession            = require('../../models/sat/SatTestSession');
 const SatFullLengthSession      = require('../../models/sat/SatFullLengthSession');
 const SatExamConfig             = require('../../models/sat/SatExamConfig');
 const SatFullLengthExamConfig   = require('../../models/sat/SatFullLengthExamConfig');
+const SatPracticeTestConfig     = require('../../models/sat/SatPracticeTestConfig');
+const SatPracticeSession        = require('../../models/sat/SatPracticeSession');
 const SatAssignment             = require('../../models/sat/SatAssignment');
 const SatQuestionBank           = require('../../models/sat/SatQuestionBank');
 const SatStudentQuestionHistory = require('../../models/sat/SatStudentQuestionHistory');
-const { assembleQuestions, stripAnswers } = require('../../utils/satAssembly');
+const { assembleQuestions, assemblePracticeQuestions, stripAnswers } = require('../../utils/satAssembly');
 
 // Appends question IDs to the student's seen history for a subject
 const recordSeenQuestions = async (studentId, subject, questionIds) => {
@@ -17,46 +19,76 @@ const recordSeenQuestions = async (studentId, subject, questionIds) => {
 };
 
 // ── POST /api/sat/test/start ──────────────────────────────────────────────────
-// Body: { assignment_id }
+// ── GET /api/sat/test/configs ─────────────────────────────────────────────────
+// Returns all active mock/diagnostic exam configs for student self-serve browsing
+const listExamConfigs = async (req, res) => {
+  try {
+    const configs = await SatExamConfig.find({ is_active: true })
+      .select('name subject type adaptive_threshold module_1')
+      .sort({ subject: 1, type: 1, name: 1 })
+      .lean();
+    res.json({ success: true, data: configs });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ── POST /api/sat/test/start ──────────────────────────────────────────────────
+// Body: { assignment_id } OR { exam_config_id }
 const startSession = async (req, res) => {
   try {
-    const { assignment_id } = req.body;
-    if (!assignment_id) return res.status(400).json({ success: false, message: 'assignment_id is required' });
+    const { assignment_id, exam_config_id: directConfigId } = req.body;
+    if (!assignment_id && !directConfigId) {
+      return res.status(400).json({ success: false, message: 'assignment_id or exam_config_id is required' });
+    }
 
-    const assignment = await SatAssignment.findOne({
-      _id:        assignment_id,
-      student_id: req.userId,
-      is_active:  true,
-    });
-    if (!assignment) return res.status(404).json({ success: false, message: 'Assignment not found' });
-    if (assignment.status === 'completed') return res.status(400).json({ success: false, message: 'Assignment already completed' });
+    let examConfig;
+    let assignmentDoc = null;
 
-    // Resume existing in-progress session
-    if (assignment.status === 'in_progress' && assignment.session_id) {
-      const existing = await SatTestSession.findById(assignment.session_id).lean();
-      if (existing) {
-        const questions = await SatQuestionBank.find({ _id: { $in: existing.module_1.question_ids } }).lean();
-        return res.json({
-          success:    true,
-          resumed:    true,
-          session_id: existing._id,
-          status:     existing.status,
-          subject:    existing.subject,
-          module_1: {
-            questions:          stripAnswers(questions),
-            time_limit_minutes: (await SatExamConfig.findById(existing.exam_config_id).lean()).module_1.time_limit_minutes,
-            started_at:         existing.module_1.started_at,
-          },
-        });
+    if (assignment_id) {
+      // Assignment-based flow (legacy — kept for backward compat)
+      assignmentDoc = await SatAssignment.findOne({
+        _id:        assignment_id,
+        student_id: req.userId,
+        is_active:  true,
+      });
+      if (!assignmentDoc) return res.status(404).json({ success: false, message: 'Assignment not found' });
+      if (assignmentDoc.status === 'completed') return res.status(400).json({ success: false, message: 'Assignment already completed' });
+
+      if (assignmentDoc.test_type === 'full_length') {
+        return startFullLengthSession(req, res, assignmentDoc);
       }
+
+      // Resume existing in-progress session
+      if (assignmentDoc.status === 'in_progress' && assignmentDoc.session_id) {
+        const existing = await SatTestSession.findById(assignmentDoc.session_id).lean();
+        if (existing) {
+          const questions = await SatQuestionBank.find({ _id: { $in: existing.module_1.question_ids } }).lean();
+          const cfg = await SatExamConfig.findById(existing.exam_config_id).lean();
+          return res.json({
+            success:    true,
+            resumed:    true,
+            session_id: existing._id,
+            status:     existing.status,
+            subject:    existing.subject,
+            module_1: {
+              questions:          stripAnswers(questions),
+              time_limit_minutes: cfg.module_1.time_limit_minutes,
+              started_at:         existing.module_1.started_at,
+            },
+          });
+        }
+      }
+
+      examConfig = await SatExamConfig.findById(assignmentDoc.exam_config_id);
+    } else {
+      // Direct / self-serve flow — no assignment required
+      examConfig = await SatExamConfig.findById(directConfigId);
     }
 
-    if (assignment.test_type === 'full_length') {
-      return startFullLengthSession(req, res, assignment);
+    if (!examConfig || !examConfig.is_active) {
+      return res.status(404).json({ success: false, message: 'Exam config not found' });
     }
-
-    const examConfig = await SatExamConfig.findById(assignment.exam_config_id);
-    if (!examConfig) return res.status(404).json({ success: false, message: 'Exam config not found' });
 
     // Get student's question history to avoid repeats
     const history = await SatStudentQuestionHistory.findOne({
@@ -66,8 +98,8 @@ const startSession = async (req, res) => {
     const seenIds = history?.seen_question_ids || [];
 
     // Assemble M1 and pre-fetch all M2 tiers in parallel
-    const m1Questions = await assembleQuestions(examConfig.subject, examConfig.module_1, seenIds);
-    const m1Ids       = m1Questions.map((q) => q._id);
+    const m1Questions  = await assembleQuestions(examConfig.subject, examConfig.module_1, seenIds);
+    const m1Ids        = m1Questions.map((q) => q._id);
     const excludeForM2 = [...seenIds, ...m1Ids];
 
     const prefetchJobs = [
@@ -83,7 +115,7 @@ const startSession = async (req, res) => {
     const session = await SatTestSession.create({
       student_id:     req.userId,
       exam_config_id: examConfig._id,
-      assignment_id:  assignment._id,
+      assignment_id:  assignmentDoc?._id,
       subject:        examConfig.subject,
       status:         'm1_in_progress',
       module_1: {
@@ -97,10 +129,12 @@ const startSession = async (req, res) => {
       },
     });
 
-    await SatAssignment.findByIdAndUpdate(assignment._id, {
-      status:     'in_progress',
-      session_id: session._id,
-    });
+    if (assignmentDoc) {
+      await SatAssignment.findByIdAndUpdate(assignmentDoc._id, {
+        status:     'in_progress',
+        session_id: session._id,
+      });
+    }
 
     res.status(201).json({
       success:    true,
@@ -234,9 +268,9 @@ const submitModule1 = async (req, res) => {
     const gradedAnswers = session.module_1.question_ids.map((qId) => {
       const q        = questionMap[qId.toString()];
       const answer   = answers.find((a) => a.question_id?.toString() === qId.toString());
-      const selected = answer?.selected?.toUpperCase() || null;
-      const correct  = q?.correct_answer?.toUpperCase();
-      const isCorrect = selected !== null && selected === correct;
+      const selected  = answer?.selected?.trim() || null;
+      const correct   = q?.correct_answer?.trim();
+      const isCorrect = selected !== null && selected.toLowerCase() === correct?.toLowerCase();
       const pts       = isCorrect ? (q?.points || 1) : 0;
       score += pts;
       return { question_id: qId, selected, is_correct: isCorrect, points_earned: pts };
@@ -282,7 +316,7 @@ const submitModule1 = async (req, res) => {
       const q = questionMap[a.question_id.toString()];
       return {
         question_id:    a.question_id,
-        title:          q?.title,
+        stem:           q?.stem,
         selected:       a.selected,
         correct_answer: q?.correct_answer,
         is_correct:     a.is_correct,
@@ -360,9 +394,9 @@ const submitModule2 = async (req, res) => {
     const gradedAnswers = session.module_2.question_ids.map((qId) => {
       const q        = questionMap[qId.toString()];
       const answer   = answers.find((a) => a.question_id?.toString() === qId.toString());
-      const selected = answer?.selected?.toUpperCase() || null;
-      const correct  = q?.correct_answer?.toUpperCase();
-      const isCorrect = selected !== null && selected === correct;
+      const selected  = answer?.selected?.trim() || null;
+      const correct   = q?.correct_answer?.trim();
+      const isCorrect = selected !== null && selected.toLowerCase() === correct?.toLowerCase();
       const pts       = isCorrect ? (q?.points || 1) : 0;
       score += pts;
       return { question_id: qId, selected, is_correct: isCorrect, points_earned: pts };
@@ -414,7 +448,7 @@ const submitModule2 = async (req, res) => {
       const q = questionMap[a.question_id.toString()];
       return {
         question_id:    a.question_id,
-        title:          q?.title,
+        stem:           q?.stem,
         selected:       a.selected,
         correct_answer: q?.correct_answer,
         is_correct:     a.is_correct,
@@ -457,11 +491,13 @@ const getResults = async (req, res) => {
         const q = questionMap[a.question_id?.toString()];
         return {
           question_id:    a.question_id,
-          title:          q?.title,
-          description:    q?.description,
-          choices:        q?.choices,
+          stem:           q?.stem,
+          option_a:       q?.option_a,
+          option_b:       q?.option_b,
+          option_c:       q?.option_c,
+          option_d:       q?.option_d,
           topic:          q?.topic,
-          domain:         q?.domain,
+          sub_topic:      q?.sub_topic,
           difficulty:     q?.difficulty,
           points:         q?.points,
           selected:       a.selected,
@@ -509,4 +545,261 @@ const getResults = async (req, res) => {
   }
 };
 
-module.exports = { startSession, submitModule1, getModule2, submitModule2, getResults };
+// ── Practice Test Handlers ────────────────────────────────────────────────────
+
+// GET /api/sat/test/practice
+// Guest users: only is_demo_accessible tests. Paid users: all active.
+const listPracticeConfigs = async (req, res) => {
+  try {
+    const filter = { is_active: true };
+    if (req.userRole === 'guest') filter.is_demo_accessible = true;
+
+    const configs = await SatPracticeTestConfig.find(filter)
+      .sort({ display_order: 1, createdAt: -1 })
+      .lean();
+
+    res.json({ success: true, count: configs.length, data: configs });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/sat/test/practice/start
+// Body: { config_id, assignment_id? }
+const startPracticeSession = async (req, res) => {
+  try {
+    const { config_id, assignment_id } = req.body;
+    if (!config_id) return res.status(400).json({ success: false, message: 'config_id is required' });
+
+    const config = await SatPracticeTestConfig.findById(config_id).lean();
+    if (!config || !config.is_active) return res.status(404).json({ success: false, message: 'Practice config not found' });
+
+    // Demo/guest users can only access demo-accessible tests
+    if (req.userRole === 'guest' && !config.is_demo_accessible) {
+      return res.status(403).json({ success: false, message: 'Upgrade to access this practice test' });
+    }
+
+    // Resume existing in-progress session for this config
+    const existing = await SatPracticeSession.findOne({
+      student_id: req.userId,
+      practice_config_id: config_id,
+      status: 'in_progress',
+    }).lean();
+
+    if (existing) {
+      const questions = await SatQuestionBank.find({ _id: { $in: existing.question_ids } }).lean();
+      return res.json({
+        success:    true,
+        resumed:    true,
+        session_id: existing._id,
+        questions:  stripAnswers(questions),
+        time_limit_minutes: config.time_limit_minutes,
+        started_at: existing.started_at,
+      });
+    }
+
+    // Get previously seen question IDs for this student in this topic/domain
+    const seenSessions = await SatPracticeSession.find({
+      student_id:         req.userId,
+      practice_config_id: config_id,
+      status:             'complete',
+    }).select('question_ids').lean();
+    const seenIds = seenSessions.flatMap(s => s.question_ids);
+
+    const sub_topic = config.sub_topic || config.domain;
+    const questions = await assemblePracticeQuestions(
+      config.subject,
+      config.topic,
+      sub_topic,
+      config.difficulty_distribution,
+      seenIds
+    );
+
+    if (!questions.length) {
+      return res.status(400).json({ success: false, message: 'No questions available for this practice test' });
+    }
+
+    const session = await SatPracticeSession.create({
+      student_id:         req.userId,
+      practice_config_id: config._id,
+      assignment_id:      assignment_id || undefined,
+      status:             'in_progress',
+      question_ids:       questions.map(q => q._id),
+      started_at:         new Date(),
+    });
+
+    // Update assignment status if this is assignment-based
+    if (assignment_id) {
+      await SatAssignment.findByIdAndUpdate(assignment_id, {
+        status:     'in_progress',
+        session_id: session._id,
+      });
+    }
+
+    res.status(201).json({
+      success:            true,
+      session_id:         session._id,
+      questions:          stripAnswers(questions),
+      time_limit_minutes: config.time_limit_minutes,
+      started_at:         session.started_at,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/sat/test/practice/:sessionId/submit
+// Body: { answers: [{ question_id, selected }] }
+const submitPractice = async (req, res) => {
+  try {
+    const session = await SatPracticeSession.findOne({
+      _id:        req.params.sessionId,
+      student_id: req.userId,
+      status:     'in_progress',
+    });
+    if (!session) return res.status(404).json({ success: false, message: 'Active practice session not found' });
+
+    const { answers = [] } = req.body;
+    const questions  = await SatQuestionBank.find({ _id: { $in: session.question_ids } }).lean();
+    const questionMap = Object.fromEntries(questions.map(q => [q._id.toString(), q]));
+
+    let score = 0;
+    const gradedAnswers = session.question_ids.map((qId) => {
+      const q        = questionMap[qId.toString()];
+      const answer   = answers.find(a => a.question_id?.toString() === qId.toString());
+      const selected  = answer?.selected?.trim() || null;
+      const correct   = q?.correct_answer?.trim();
+      const isCorrect = selected !== null && selected.toLowerCase() === correct?.toLowerCase();
+      const pts       = isCorrect ? (q?.points || 1) : 0;
+      score += pts;
+      return { question_id: qId, selected, is_correct: isCorrect, points_earned: pts };
+    });
+
+    const maxScore   = questions.reduce((sum, q) => sum + (q.points || 1), 0);
+    const percentage = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+    const now        = new Date();
+
+    await SatPracticeSession.findByIdAndUpdate(session._id, {
+      status:       'complete',
+      answers:      gradedAnswers,
+      score,
+      max_score:    maxScore,
+      percentage,
+      submitted_at: now,
+    });
+
+    if (session.assignment_id) {
+      await SatAssignment.findByIdAndUpdate(session.assignment_id, { status: 'completed' });
+    }
+
+    const breakdown = gradedAnswers.map(a => {
+      const q = questionMap[a.question_id.toString()];
+      return {
+        question_id:    a.question_id,
+        stem:           q?.stem,
+        option_a:       q?.option_a,
+        option_b:       q?.option_b,
+        option_c:       q?.option_c,
+        option_d:       q?.option_d,
+        topic:          q?.topic,
+        sub_topic:      q?.sub_topic,
+        difficulty:     q?.difficulty,
+        selected:       a.selected,
+        correct_answer: q?.correct_answer,
+        is_correct:     a.is_correct,
+        explanation:    q?.explanation,
+      };
+    });
+
+    res.json({
+      success:      true,
+      score,
+      max_score:    maxScore,
+      percentage,
+      submitted_at: now,
+      breakdown,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/sat/test/practice/:sessionId/results
+const getPracticeResults = async (req, res) => {
+  try {
+    const session = await SatPracticeSession.findOne({
+      _id:        req.params.sessionId,
+      student_id: req.userId,
+      status:     'complete',
+    }).populate('practice_config_id', 'name subject topic sub_topic').lean();
+    if (!session) return res.status(404).json({ success: false, message: 'Completed practice session not found' });
+
+    const questions  = await SatQuestionBank.find({ _id: { $in: session.question_ids } }).lean();
+    const questionMap = Object.fromEntries(questions.map(q => [q._id.toString(), q]));
+
+    const breakdown = (session.answers || []).map(a => {
+      const q = questionMap[a.question_id?.toString()];
+      return {
+        question_id:    a.question_id,
+        stem:           q?.stem,
+        option_a:       q?.option_a,
+        option_b:       q?.option_b,
+        option_c:       q?.option_c,
+        option_d:       q?.option_d,
+        topic:          q?.topic,
+        sub_topic:      q?.sub_topic,
+        difficulty:     q?.difficulty,
+        points:         q?.points,
+        selected:       a.selected,
+        correct_answer: q?.correct_answer,
+        is_correct:     a.is_correct,
+        explanation:    q?.explanation,
+      };
+    });
+
+    const topicSummary = {};
+    (session.answers || []).forEach(a => {
+      const q     = questionMap[a.question_id?.toString()];
+      const topic = q?.topic || 'Unknown';
+      if (!topicSummary[topic]) topicSummary[topic] = { correct: 0, total: 0 };
+      topicSummary[topic].total++;
+      if (a.is_correct) topicSummary[topic].correct++;
+    });
+
+    res.json({
+      success: true,
+      data: {
+        session_id:   session._id,
+        config:       session.practice_config_id,
+        score:        session.score,
+        max_score:    session.max_score,
+        percentage:   session.percentage,
+        submitted_at: session.submitted_at,
+        breakdown,
+        topic_summary: topicSummary,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/sat/test/practice/history
+const getPracticeHistory = async (req, res) => {
+  try {
+    const sessions = await SatPracticeSession.find({ student_id: req.userId })
+      .populate('practice_config_id', 'name subject topic domain')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({ success: true, count: sessions.length, data: sessions });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+module.exports = {
+  listExamConfigs,
+  startSession, submitModule1, getModule2, submitModule2, getResults,
+  listPracticeConfigs, startPracticeSession, submitPractice, getPracticeResults, getPracticeHistory,
+};

@@ -23,6 +23,15 @@ const satExamConfigSchema = new mongoose.Schema(
     module_2_easy:               { type: moduleConfigSchema, required: true },
     adaptive_threshold:          { type: Number, default: 60 },
     adaptive_threshold_medium:   { type: Number, default: 40 },
+    score_bands: [{
+      _id:        false,
+      min_score:  { type: Number },
+      label:      { type: String },
+      easy_pct:   { type: Number },
+      medium_pct: { type: Number },
+      hard_pct:   { type: Number },
+    }],
+    type:               { type: String, enum: ['mock', 'diagnostic'], default: 'mock' },
     is_active:          { type: Boolean, default: true },
   },
   { timestamps: true }

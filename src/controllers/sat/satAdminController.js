@@ -3,11 +3,13 @@ const XLSX                   = require('xlsx');
 const SatQuestionBank        = require('../../models/sat/SatQuestionBank');
 const SatExamConfig          = require('../../models/sat/SatExamConfig');
 const SatFullLengthExamConfig = require('../../models/sat/SatFullLengthExamConfig');
+const SatPracticeTestConfig  = require('../../models/sat/SatPracticeTestConfig');
 const SatBulkImportLog       = require('../../models/sat/SatBulkImportLog');
 
 const VALID_DIFFICULTIES = ['easy', 'medium', 'hard'];
 const VALID_SUBJECTS     = ['math', 'reading_writing'];
 const VALID_MCQ_ANSWERS  = ['A', 'B', 'C', 'D'];
+const VALID_FORMATS      = ['mcq', 'grid_in'];
 
 const SUBJECT_MAP = {
   // Math variants
@@ -53,69 +55,110 @@ const bulkUpload = async (req, res) => {
     const errors   = [];
 
     for (let i = 0; i < rows.length; i++) {
-      const row    = rows[i];
       const rowNum = i + 2;
 
-      // Support both their column names and our original names
-      const title          = (row.question   || row.title)?.trim();
-      const rawSubject     = (row.subject)?.trim().toLowerCase();
-      const subject        = SUBJECT_MAP[rawSubject] || (VALID_SUBJECTS.includes(rawSubject) ? rawSubject : null);
-      const difficulty     = (row.difficulty_level || row.difficulty)?.trim().toLowerCase();
-      const domain         = (row.subtopic   || row.domain)?.trim();
-      const topic          = (row.skill      || row.topic)?.trim();
-      const correct_answer = (row.correct_answer)?.trim().toUpperCase();
-      const status         = (row.question_status || '').trim().toLowerCase();
+      // Normalize all header keys to lowercase so uploads are case-insensitive
+      const row = Object.fromEntries(Object.entries(rows[i]).map(([k, v]) => [k.toLowerCase(), v]));
 
-      // Skip unapproved questions when status column is present
-      if (row.question_status && status !== 'approved') {
-        errors.push({ row_number: rowNum, reason: `skipped — status is "${row.question_status}"` });
+      const stem           = (row.stem || row.question || row.title)?.trim();
+      const rawSubject     = row.subject?.trim().toLowerCase();
+      const subject        = SUBJECT_MAP[rawSubject] || (VALID_SUBJECTS.includes(rawSubject) ? rawSubject : null);
+      const difficulty     = (row.difficulty || row.difficulty_level)?.trim().toLowerCase();
+      const sub_topic      = (row.sub_topic || row.subtopic || row.domain)?.trim();
+      const topic          = (row.topic)?.trim();
+      const skill_tag      = (row.skill_tag || row.skill || '').trim();
+      const rawFormat      = (row.format || row.question_type || 'mcq').trim().toLowerCase();
+      const format         = VALID_FORMATS.includes(rawFormat) ? rawFormat : 'mcq';
+      const rawStatus      = (row.review_status || row.question_status || '').trim().toLowerCase();
+
+      // correct_answer: uppercase only for MCQ (A/B/C/D); keep as-is for grid_in
+      const rawAnswer      = row.correct_answer?.trim();
+      const correct_answer = format === 'mcq' ? rawAnswer?.toUpperCase() : rawAnswer;
+
+      // Skip unapproved questions when any status column is present
+      const hasStatus = row.review_status !== undefined || row.question_status !== undefined;
+      if (hasStatus && rawStatus !== 'approved') {
+        errors.push({ row_number: rowNum, reason: `skipped — status is "${rawStatus}"` });
         continue;
       }
 
-      if (!title)                                    { errors.push({ row_number: rowNum, reason: 'question/title is required' }); continue; }
+      if (!stem)                                     { errors.push({ row_number: rowNum, reason: 'stem/question is required' }); continue; }
       if (!subject)                                  { errors.push({ row_number: rowNum, reason: `unrecognised subject "${row.subject}"` }); continue; }
       if (!VALID_DIFFICULTIES.includes(difficulty))  { errors.push({ row_number: rowNum, reason: `invalid difficulty "${difficulty}"` }); continue; }
-      if (!domain)                                   { errors.push({ row_number: rowNum, reason: 'subtopic/domain is required' }); continue; }
-      if (!topic)                                    { errors.push({ row_number: rowNum, reason: 'skill/topic is required' }); continue; }
-      if (!correct_answer)                           { errors.push({ row_number: rowNum, reason: 'correct_answer is required' }); continue; }
-      if (!VALID_MCQ_ANSWERS.includes(correct_answer)) {
-        errors.push({ row_number: rowNum, reason: `correct_answer must be A/B/C/D, got "${correct_answer}"` });
+      if (!sub_topic)                                { errors.push({ row_number: rowNum, reason: 'sub_topic is required' }); continue; }
+      if (!topic)                                    { errors.push({ row_number: rowNum, reason: 'topic is required' }); continue; }
+      if (format === 'mcq' && correct_answer && !VALID_MCQ_ANSWERS.includes(correct_answer)) {
+        errors.push({ row_number: rowNum, reason: `correct_answer must be A/B/C/D for mcq, got "${correct_answer}"` });
         continue;
       }
 
-      // Parse combined options cell OR fall back to individual choice columns
-      const choices = row.options
-        ? parseOptions(row.options)
-        : { A: row.choice_a || '', B: row.choice_b || '', C: row.choice_c || '', D: row.choice_d || '' };
+      // Options: flat option_a/b/c/d (CB format) — optional for grid_in
+      const parsedOptions = row.options ? parseOptions(row.options) : null;
+      const option_a = (parsedOptions?.A || row.option_a || row.choice_a || '').trim();
+      const option_b = (parsedOptions?.B || row.option_b || row.choice_b || '').trim();
+      const option_c = (parsedOptions?.C || row.option_c || row.choice_c || '').trim();
+      const option_d = (parsedOptions?.D || row.option_d || row.choice_d || '').trim();
+
+      // isCalculatorAllowed — optional, defaults to false
+      const rawCalc = row.iscalculatorallowed;
+      const is_calculator_allowed = rawCalc !== undefined && String(rawCalc).trim() !== ''
+        ? String(rawCalc).trim().toLowerCase() === 'true'
+        : false;
 
       toInsert.push({
+        question_id:    (row.question_id || '').trim(),
+        cb_question_id: (row.cb_question_id || '').trim(),
+        cb_external_id: (row.cb_external_id || '').trim(),
+        cb_ibn:         (row.cb_ibn || '').trim(),
+        course:         (row.course || 'sat').trim(),
         subject,
-        domain,
         topic,
+        sub_topic,
+        skill_tag,
         difficulty,
-        title,
-        description:       '',
-        question_type:     'mcq',
-        choices,
+        format,
+        passage_id:     row.passage_id?.trim() || null,
+        stem,
+        option_a,
+        option_b,
+        option_c,
+        option_d,
         correct_answer,
-        explanation:       (row.explanation_correct || row.explanation || '').trim(),
-        explanation_wrong: (row.explanation_wrong   || '').trim(),
-        hint:              (row.hint                || '').trim(),
-        points:            Number(row.points) || 1,
-        image_url:         (row.image_url           || '').trim(),
+        explanation:    (row.explanation || row.explanation_correct || '').trim(),
+        hint_1:         (row.hint_1 || '').trim(),
+        hint_2:         (row.hint_2 || '').trim(),
+        hint_3:         (row.hint_3 || '').trim(),
+        review_status:  rawStatus || 'approved',
+        source:         (row.source || '').trim(),
+        points:         Number(row.points) || 1,
+        is_calculator_allowed,
       });
     }
 
-    // Skip exact duplicates already in the bank (same title + subject)
+    // Dedup: prefer question_id match when present, else fall back to stem+subject
     let successful = 0;
     if (toInsert.length) {
-      const existing = await SatQuestionBank.find({
-        title:   { $in: toInsert.map((q) => q.title) },
-        subject: { $in: [...new Set(toInsert.map((q) => q.subject))] },
-      }).select('title subject').lean();
+      const withId    = toInsert.filter((q) => q.question_id);
+      const withoutId = toInsert.filter((q) => !q.question_id);
 
-      const existingSet = new Set(existing.map((e) => `${e.title}||${e.subject}`));
-      const fresh       = toInsert.filter((q) => !existingSet.has(`${q.title}||${q.subject}`));
+      const existingIds = withId.length
+        ? await SatQuestionBank.find({ question_id: { $in: withId.map((q) => q.question_id) } })
+            .select('question_id').lean()
+        : [];
+      const existingIdSet = new Set(existingIds.map((e) => e.question_id));
+
+      const existingStems = withoutId.length
+        ? await SatQuestionBank.find({
+            stem:    { $in: withoutId.map((q) => q.stem) },
+            subject: { $in: [...new Set(withoutId.map((q) => q.subject))] },
+          }).select('stem subject').lean()
+        : [];
+      const existingStemSet = new Set(existingStems.map((e) => `${e.stem}||${e.subject}`));
+
+      const fresh = [
+        ...withId.filter((q) => !existingIdSet.has(q.question_id)),
+        ...withoutId.filter((q) => !existingStemSet.has(`${q.stem}||${q.subject}`)),
+      ];
 
       if (fresh.length) {
         await SatQuestionBank.insertMany(fresh, { ordered: false });
@@ -154,7 +197,7 @@ const getQuestions = async (req, res) => {
     const filter = { is_active: true };
     if (req.query.subject)    filter.subject    = req.query.subject;
     if (req.query.difficulty) filter.difficulty = req.query.difficulty;
-    if (req.query.domain)     filter.domain     = req.query.domain;
+    if (req.query.sub_topic)  filter.sub_topic  = req.query.sub_topic;
     if (req.query.topic)      filter.topic      = req.query.topic;
 
     const page  = Math.max(1, parseInt(req.query.page)  || 1);
@@ -317,6 +360,47 @@ const updateFullLengthConfig = async (req, res) => {
   }
 };
 
+// ── PracticeTestConfig ────────────────────────────────────────────────────────
+
+// POST /api/sat/admin/practice-configs
+const createPracticeConfig = async (req, res) => {
+  try {
+    const config = await SatPracticeTestConfig.create(req.body);
+    res.status(201).json({ success: true, data: config });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/sat/admin/practice-configs
+const getPracticeConfigs = async (req, res) => {
+  try {
+    const filter = {};
+    if (req.query.subject) filter.subject = req.query.subject;
+    if (req.query.topic)     filter.topic     = req.query.topic;
+    if (req.query.sub_topic) filter.sub_topic = req.query.sub_topic;
+    if (req.query.active !== undefined) filter.is_active = req.query.active !== 'false';
+
+    const configs = await SatPracticeTestConfig.find(filter).sort({ display_order: 1, createdAt: -1 }).lean();
+    res.json({ success: true, count: configs.length, data: configs });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/sat/admin/practice-configs/:id
+const updatePracticeConfig = async (req, res) => {
+  try {
+    const config = await SatPracticeTestConfig.findByIdAndUpdate(req.params.id, req.body, {
+      new: true, runValidators: true,
+    });
+    if (!config) return res.status(404).json({ success: false, message: 'Practice config not found' });
+    res.json({ success: true, data: config });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   bulkUpload,
   getQuestions,
@@ -330,4 +414,7 @@ module.exports = {
   createFullLengthConfig,
   getFullLengthConfigs,
   updateFullLengthConfig,
+  createPracticeConfig,
+  getPracticeConfigs,
+  updatePracticeConfig,
 };

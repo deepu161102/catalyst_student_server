@@ -1,8 +1,8 @@
 const jwt = require('jsonwebtoken');
 
 const extractToken = (req) =>
-  req.cookies?.token ||
-  (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.split(' ')[1]);
+  (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.split(' ')[1]) ||
+  req.cookies?.token;
 
 // Any authenticated user (student, guest, mentor, operations)
 const protect = (req, res, next) => {

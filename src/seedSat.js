@@ -426,14 +426,32 @@ const seed = async () => {
   );
   console.log(`✓ Student: ${USERS.student.email} / student123`);
 
-  // Questions — upsert by title+subject to stay idempotent
+  // Map legacy seed question shape → new schema field names
+  const toNewShape = (q, subject) => {
+    const { title, domain, choices, question_type, explanation_wrong, ...rest } = q;
+    return {
+      ...rest,
+      stem:      title,
+      sub_topic: domain,
+      topic:     rest.topic || domain,
+      option_a:  choices?.A || '',
+      option_b:  choices?.B || '',
+      option_c:  choices?.C || '',
+      option_d:  choices?.D || '',
+      format:    'mcq',
+      subject,
+      is_active: true,
+    };
+  };
+
+  // Questions — upsert by stem+subject to stay idempotent
   let mathCount = 0;
   let rwCount   = 0;
 
   for (const q of MATH_QUESTIONS) {
     await SatQuestionBank.findOneAndUpdate(
-      { title: q.title, subject: 'math' },
-      { ...q, subject: 'math', question_type: 'mcq', is_active: true },
+      { stem: q.title, subject: 'math' },
+      toNewShape(q, 'math'),
       { upsert: true, new: true }
     );
     mathCount++;
@@ -442,8 +460,8 @@ const seed = async () => {
 
   for (const q of RW_QUESTIONS) {
     await SatQuestionBank.findOneAndUpdate(
-      { title: q.title, subject: 'reading_writing' },
-      { ...q, subject: 'reading_writing', question_type: 'mcq', is_active: true },
+      { stem: q.title, subject: 'reading_writing' },
+      toNewShape(q, 'reading_writing'),
       { upsert: true, new: true }
     );
     rwCount++;

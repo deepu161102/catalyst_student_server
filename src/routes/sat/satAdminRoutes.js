@@ -16,6 +16,9 @@ const {
   createFullLengthConfig,
   getFullLengthConfigs,
   updateFullLengthConfig,
+  createPracticeConfig,
+  getPracticeConfigs,
+  updatePracticeConfig,
 } = require('../../controllers/sat/satAdminController');
 
 const upload = multer({
@@ -51,5 +54,12 @@ router.route('/full-length-configs')
   .post(createFullLengthConfig);
 
 router.put('/full-length-configs/:id', updateFullLengthConfig);
+
+// Practice test configs
+router.route('/practice-configs')
+  .get(getPracticeConfigs)
+  .post(createPracticeConfig);
+
+router.put('/practice-configs/:id', updatePracticeConfig);
 
 module.exports = router;

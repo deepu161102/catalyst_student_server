@@ -194,6 +194,85 @@ const deleteAssignment = async (req, res) => {
   }
 };
 
+// ── GET /api/assignments/my?studentId=:id ────────────────────────────────────
+// Returns all published assignments for a student (by their batches), along
+// with that student's attempt data for each one.
+// Response shape: { success, data: [{ assignment, myAttempt }] }
+const getMyAssignments = async (req, res) => {
+  try {
+    const { studentId } = req.query;
+    if (!studentId) {
+      return res.status(400).json({ success: false, message: 'studentId is required' });
+    }
+
+    const batches = await Batch.find({ studentId }).select('_id').lean();
+    const batchIds = batches.map(b => b._id);
+    if (batchIds.length === 0) return res.json({ success: true, data: [] });
+
+    const assignments = await Assignment.find({
+      enrolledBatches: { $in: batchIds },
+      status:   'published',
+      isActive: true,
+    })
+      .select('-sections.modules.questions.correctAnswer -sections.modules.questions.explanation')
+      .lean();
+
+    if (assignments.length === 0) return res.json({ success: true, data: [] });
+
+    const assignmentIds = assignments.map(a => a._id);
+    const responses = await AssignmentResponse.find({
+      assignmentId: { $in: assignmentIds },
+      studentId,
+    }).lean();
+
+    const responseMap = {};
+    for (const r of responses) responseMap[r.assignmentId.toString()] = r;
+
+    const buildSectionResults = (assignment, response) => {
+      if (!response) return [];
+      const moduleMaxScore = {};
+      for (const s of (assignment.sections || [])) {
+        for (const m of (s.modules || [])) {
+          moduleMaxScore[m.mid] = (m.questions || []).reduce((sum, q) => sum + (q.score || 1), 0);
+        }
+      }
+      return (response.sectionResponses || []).map(sr => ({
+        sectionId:   sr.sid,
+        sectionName: sr.sid === 'rw' ? 'Reading and Writing' : 'Math',
+        modules: (sr.moduleResponses || []).map(mr => ({
+          moduleNumber:   mr.moduleNumber,
+          score:          mr.score,
+          maxScore:       moduleMaxScore[mr.mid] ?? mr.totalQuestions,
+          correctAnswers: mr.correctAnswers,
+          totalQuestions: mr.totalQuestions,
+          timeTaken:      null,
+          answers:        Object.fromEntries((mr.answers || []).map(a => [a.qid, a.selected])),
+        })),
+      }));
+    };
+
+    const data = assignments.map(assignment => {
+      const response = responseMap[assignment._id.toString()];
+      return {
+        assignment,
+        myAttempt: {
+          status:         response ? (response.status === 'submitted' ? 'completed' : response.status) : 'not_started',
+          score:          response?.overallScore ?? null,
+          maxScore:       response?.maxScore     ?? null,
+          percentage:     response?.percentage   ?? null,
+          passed:         response?.passed       ?? null,
+          completedAt:    response?.submittedAt  ?? null,
+          sectionResults: buildSectionResults(assignment, response),
+        },
+      };
+    });
+
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // ── GET /api/assignments/guest ────────────────────────────────────────────────
 // Guest portal: only assignments explicitly marked isGuestAccessible.
 const getGuestAssignments = async (req, res) => {
@@ -347,6 +426,7 @@ module.exports = {
   getAssignments,
   getAssignmentById,
   getAssignmentForStudent,
+  getMyAssignments,
   createAssignment,
   updateAssignment,
   updateStatus,

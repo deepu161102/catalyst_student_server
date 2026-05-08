@@ -64,8 +64,25 @@ const assembleQuestions = async (subject, moduleConfig, excludeIds = []) => {
   return shuffle([...easyQs, ...mediumQs, ...hardQs]);
 };
 
+// Assembles questions for a practice test filtered by topic + sub_topic.
+// Soft-fails: returns however many questions are available if bank is thin.
+const assemblePracticeQuestions = async (subject, topic, sub_topic, diffConfig, excludeIds = []) => {
+  const { easy, medium, hard } = diffConfig;
+  const base = { subject, is_active: true };
+  if (topic)     base.topic     = topic;
+  if (sub_topic) base.sub_topic = sub_topic;
+
+  const [easyQs, mediumQs, hardQs] = await Promise.all([
+    fetchDifficulty(base, 'easy',   easy,   excludeIds),
+    fetchDifficulty(base, 'medium', medium, excludeIds),
+    fetchDifficulty(base, 'hard',   hard,   excludeIds),
+  ]);
+
+  return shuffle([...easyQs, ...mediumQs, ...hardQs]);
+};
+
 // Strips correct_answer and explanation before sending to student
 const stripAnswers = (questions) =>
   questions.map(({ correct_answer, explanation, ...q }) => q);
 
-module.exports = { assembleQuestions, stripAnswers };
+module.exports = { assembleQuestions, assemblePracticeQuestions, stripAnswers };
