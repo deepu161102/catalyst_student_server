@@ -623,6 +623,8 @@ const startPracticeSession = async (req, res) => {
       student_id:         req.userId,
       practice_config_id: config._id,
       assignment_id:      assignment_id || undefined,
+      subject:            config.subject,
+      sub_topic:          config.sub_topic || config.domain || config.topic,
       status:             'in_progress',
       question_ids:       questions.map(q => q._id),
       started_at:         new Date(),
@@ -798,8 +800,21 @@ const getPracticeHistory = async (req, res) => {
   }
 };
 
+// GET /api/sat/test/history — completed SatTestSession records for the student
+const getHistory = async (req, res) => {
+  try {
+    const sessions = await SatTestSession.find({ student_id: req.userId, status: 'complete' })
+      .select('exam_config_id subject status total_score module_1.score module_1.max_score module_2.score module_2.max_score createdAt')
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, count: sessions.length, data: sessions });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   listExamConfigs,
   startSession, submitModule1, getModule2, submitModule2, getResults,
-  listPracticeConfigs, startPracticeSession, submitPractice, getPracticeResults, getPracticeHistory,
+  listPracticeConfigs, startPracticeSession, submitPractice, getPracticeResults, getPracticeHistory, getHistory,
 };

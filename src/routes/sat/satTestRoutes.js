@@ -14,6 +14,7 @@ const {
   submitPractice,
   getPracticeResults,
   getPracticeHistory,
+  getHistory,
 } = require('../../controllers/sat/satTestController');
 
 const { getStudentAssignments } = require('../../controllers/sat/satMentorController');
@@ -28,6 +29,7 @@ router.get('/practice/:sessionId/results',   protect, getPracticeResults);
 // All routes below require a fully paid (non-guest) account
 router.use(protect, requireFullAccess);
 
+router.get('/history',                           getHistory);
 router.get('/configs',                           listExamConfigs);
 router.get('/assignments',                       getStudentAssignments);
 router.post('/start',                            startSession);

@@ -12,6 +12,8 @@ const satPracticeSessionSchema = new mongoose.Schema(
     student_id:         { type: mongoose.Schema.Types.ObjectId, ref: 'Student', required: true },
     practice_config_id: { type: mongoose.Schema.Types.ObjectId, ref: 'SatPracticeTestConfig', required: true },
     assignment_id:      { type: mongoose.Schema.Types.ObjectId, ref: 'SatAssignment' },
+    subject:            { type: String },
+    sub_topic:          { type: String },
     status:             { type: String, enum: ['in_progress', 'complete'], default: 'in_progress' },
     question_ids:       [{ type: mongoose.Schema.Types.ObjectId }],
     answers:            [{ ...practiceAnswerSchema, _id: false }],

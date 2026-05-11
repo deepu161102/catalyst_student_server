@@ -46,7 +46,7 @@ const fetchDifficulty = async (base, difficulty, count, excludeIds) => {
 // (ignoring history) doesn't have enough questions of a given difficulty.
 const assembleQuestions = async (subject, moduleConfig, excludeIds = []) => {
   const { easy, medium, hard } = moduleConfig.difficulty_distribution;
-  const base = { subject, is_active: true };
+  const base = { subject, is_active: { $ne: false } };
 
   const [easyQs, mediumQs, hardQs] = await Promise.all([
     fetchDifficulty(base, 'easy',   easy,   excludeIds),
@@ -68,7 +68,7 @@ const assembleQuestions = async (subject, moduleConfig, excludeIds = []) => {
 // Soft-fails: returns however many questions are available if bank is thin.
 const assemblePracticeQuestions = async (subject, topic, sub_topic, diffConfig, excludeIds = []) => {
   const { easy, medium, hard } = diffConfig;
-  const base = { subject, is_active: true };
+  const base = { subject, is_active: { $ne: false } };
   if (topic)     base.topic     = topic;
   if (sub_topic) base.sub_topic = sub_topic;
 

@@ -194,7 +194,7 @@ const bulkUpload = async (req, res) => {
 // ── GET /api/sat/admin/question-bank ─────────────────────────────────────────
 const getQuestions = async (req, res) => {
   try {
-    const filter = { is_active: true };
+    const filter = { is_active: { $ne: false } };
     if (req.query.subject)    filter.subject    = req.query.subject;
     if (req.query.difficulty) filter.difficulty = req.query.difficulty;
     if (req.query.sub_topic)  filter.sub_topic  = req.query.sub_topic;
@@ -247,7 +247,7 @@ const deleteQuestion = async (req, res) => {
 const getQuestionStats = async (req, res) => {
   try {
     const stats = await SatQuestionBank.aggregate([
-      { $match: { is_active: true } },
+      { $match: { is_active: { $ne: false } } },
       {
         $group: {
           _id:   { subject: '$subject', difficulty: '$difficulty' },
