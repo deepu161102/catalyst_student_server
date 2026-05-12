@@ -259,8 +259,11 @@ const getStudentAdaptiveSessions = async (req, res) => {
     const studentId = req.params.studentId;
 
     // Standalone subject sessions — NOT part of any full-length test
+    // Using `null` instead of `$exists: false` because in MongoDB `{ field: null }` matches
+    // both documents where the field is absent AND where it is explicitly null, which is
+    // more robust in case the field was ever stored as null rather than omitted entirely.
     const subjectSessions = await SatTestSession
-      .find({ student_id: studentId, full_length_session_id: { $exists: false } })
+      .find({ student_id: studentId, full_length_session_id: null })
       .populate('exam_config_id', 'name subject type')
       .select('_id exam_config_id subject status total_score module_1.score module_1.max_score module_2.score module_2.max_score createdAt')
       .sort({ createdAt: -1 })

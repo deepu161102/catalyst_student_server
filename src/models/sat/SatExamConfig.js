@@ -32,6 +32,7 @@ const satExamConfigSchema = new mongoose.Schema(
       hard_pct:   { type: Number },
     }],
     type:               { type: String, enum: ['mock', 'diagnostic'], default: 'mock' },
+    is_demo_accessible: { type: Boolean, default: false },
     is_active:          { type: Boolean, default: true },
   },
   { timestamps: true }

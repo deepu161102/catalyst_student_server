@@ -13,6 +13,7 @@ const {
   getExamConfigs,
   getExamConfigById,
   updateExamConfig,
+  patchPairDemoAccess,
   createFullLengthConfig,
   getFullLengthConfigs,
   updateFullLengthConfig,
@@ -43,6 +44,8 @@ router.delete('/question-bank/:id',       deleteQuestion);
 router.route('/exam-configs')
   .get(getExamConfigs)
   .post(createExamConfig);
+
+router.patch('/exam-configs/pair-demo-access', patchPairDemoAccess);
 
 router.route('/exam-configs/:id')
   .get(getExamConfigById)

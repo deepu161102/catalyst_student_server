@@ -24,7 +24,7 @@ const recordSeenQuestions = async (studentId, subject, questionIds) => {
 const listExamConfigs = async (req, res) => {
   try {
     const configs = await SatExamConfig.find({ is_active: true })
-      .select('name subject type adaptive_threshold module_1')
+      .select('name subject type adaptive_threshold module_1 is_demo_accessible')
       .sort({ subject: 1, type: 1, name: 1 })
       .lean();
     res.json({ success: true, data: configs });
@@ -88,6 +88,11 @@ const startSession = async (req, res) => {
 
     if (!examConfig || !examConfig.is_active) {
       return res.status(404).json({ success: false, message: 'Exam config not found' });
+    }
+
+    // Guest users can only start demo-accessible tests
+    if (req.userRole === 'guest' && !examConfig.is_demo_accessible) {
+      return res.status(403).json({ success: false, message: 'Upgrade to access this test' });
     }
 
     // Get student's question history to avoid repeats
@@ -551,10 +556,7 @@ const getResults = async (req, res) => {
 // Guest users: only is_demo_accessible tests. Paid users: all active.
 const listPracticeConfigs = async (req, res) => {
   try {
-    const filter = { is_active: true };
-    if (req.userRole === 'guest') filter.is_demo_accessible = true;
-
-    const configs = await SatPracticeTestConfig.find(filter)
+    const configs = await SatPracticeTestConfig.find({ is_active: true })
       .sort({ display_order: 1, createdAt: -1 })
       .lean();
 

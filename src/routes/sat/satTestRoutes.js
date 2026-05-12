@@ -19,23 +19,24 @@ const {
 
 const { getStudentAssignments } = require('../../controllers/sat/satMentorController');
 
-// Practice routes — accessible to both paid and demo/guest users (no requireFullAccess)
+// Practice routes — accessible to both paid and demo/guest users
 router.get('/practice/history',              protect, getPracticeHistory);
 router.get('/practice',                      protect, listPracticeConfigs);
 router.post('/practice/start',               protect, startPracticeSession);
 router.post('/practice/:sessionId/submit',   protect, submitPractice);
 router.get('/practice/:sessionId/results',   protect, getPracticeResults);
 
-// All routes below require a fully paid (non-guest) account
-router.use(protect, requireFullAccess);
+// Diagnostic / mock test routes — accessible to guests for demo-accessible tests;
+// the startSession controller enforces is_demo_accessible for guests.
+router.get('/history',                           protect, getHistory);
+router.get('/configs',                           protect, listExamConfigs);
+router.post('/start',                            protect, startSession);
+router.post('/:sessionId/module/1/submit',       protect, submitModule1);
+router.get('/:sessionId/module/2',               protect, getModule2);
+router.post('/:sessionId/module/2/submit',       protect, submitModule2);
+router.get('/:sessionId/results',                protect, getResults);
 
-router.get('/history',                           getHistory);
-router.get('/configs',                           listExamConfigs);
-router.get('/assignments',                       getStudentAssignments);
-router.post('/start',                            startSession);
-router.post('/:sessionId/module/1/submit',       submitModule1);
-router.get('/:sessionId/module/2',               getModule2);
-router.post('/:sessionId/module/2/submit',       submitModule2);
-router.get('/:sessionId/results',                getResults);
+// Assignments — paid accounts only
+router.get('/assignments',                       protect, requireFullAccess, getStudentAssignments);
 
 module.exports = router;

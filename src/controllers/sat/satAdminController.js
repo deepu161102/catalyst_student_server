@@ -312,6 +312,29 @@ const updateExamConfig = async (req, res) => {
   }
 };
 
+// PATCH /api/sat/admin/exam-configs/pair-demo-access
+// Updates is_demo_accessible on both configs of a pair atomically.
+// Body: { mathConfigId?, rwConfigId?, is_demo_accessible: boolean }
+const patchPairDemoAccess = async (req, res) => {
+  try {
+    const { mathConfigId, rwConfigId, is_demo_accessible } = req.body;
+    if (typeof is_demo_accessible !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'is_demo_accessible must be a boolean' });
+    }
+    const ids = [mathConfigId, rwConfigId].filter(Boolean);
+    if (ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one config ID is required' });
+    }
+    await SatExamConfig.updateMany(
+      { _id: { $in: ids } },
+      { $set: { is_demo_accessible } }
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
 // ── FullLengthExamConfig ──────────────────────────────────────────────────────
 
 // POST /api/sat/admin/full-length-configs
@@ -411,6 +434,7 @@ module.exports = {
   getExamConfigs,
   getExamConfigById,
   updateExamConfig,
+  patchPairDemoAccess,
   createFullLengthConfig,
   getFullLengthConfigs,
   updateFullLengthConfig,
