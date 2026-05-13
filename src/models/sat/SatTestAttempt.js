@@ -59,5 +59,16 @@ const satTestAttemptSchema = new mongoose.Schema(
 );
 
 satTestAttemptSchema.index({ student_id: 1, test_config_id: 1, status: 1 });
+// Prevent duplicate active attempts for the same student+test; completed attempts are excluded so retakes are allowed
+satTestAttemptSchema.index(
+  { student_id: 1, test_config_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      status: { $in: ['rw_m1_in_progress', 'rw_m1_complete', 'rw_m2_in_progress', 'rw_done', 'math_m1_in_progress', 'math_m1_complete', 'math_m2_in_progress'] },
+    },
+    name: 'unique_active_attempt',
+  }
+);
 
 module.exports = mongoose.model('SatTestAttempt', satTestAttemptSchema);
