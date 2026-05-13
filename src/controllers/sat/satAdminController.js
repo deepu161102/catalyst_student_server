@@ -2,6 +2,7 @@ const { parse }              = require('csv-parse/sync');
 const XLSX                   = require('xlsx');
 const SatQuestionBank        = require('../../models/sat/SatQuestionBank');
 const SatExamConfig          = require('../../models/sat/SatExamConfig');
+const SatTestConfig          = require('../../models/sat/SatTestConfig');
 const SatFullLengthExamConfig = require('../../models/sat/SatFullLengthExamConfig');
 const SatPracticeTestConfig  = require('../../models/sat/SatPracticeTestConfig');
 const SatBulkImportLog       = require('../../models/sat/SatBulkImportLog');
@@ -424,6 +425,111 @@ const updatePracticeConfig = async (req, res) => {
   }
 };
 
+// ── Unified TestConfig (mock + diagnostic) ────────────────────────────────────
+
+// POST /api/sat/admin/test-configs
+const createTestConfig = async (req, res) => {
+  try {
+    const config = await SatTestConfig.create(req.body);
+    res.status(201).json({ success: true, data: config });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/sat/admin/test-configs
+const getTestConfigs = async (req, res) => {
+  try {
+    const filter = { is_active: { $ne: false } };
+    if (req.query.type)   filter.type      = req.query.type;
+    if (req.query.active !== undefined) filter.is_active = req.query.active !== 'false';
+
+    const configs = await SatTestConfig.find(filter).sort({ createdAt: -1 }).lean();
+    res.json({ success: true, count: configs.length, data: configs });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/sat/admin/test-configs/:testId
+const getTestConfigById = async (req, res) => {
+  try {
+    const config = await SatTestConfig.findOne({ testId: req.params.testId }).lean();
+    if (!config) return res.status(404).json({ success: false, message: 'Test config not found' });
+    res.json({ success: true, data: config });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/sat/admin/test-configs/:testId
+const updateTestConfig = async (req, res) => {
+  try {
+    const config = await SatTestConfig.findOneAndUpdate(
+      { testId: req.params.testId },
+      req.body,
+      { new: true, runValidators: true }
+    );
+    if (!config) return res.status(404).json({ success: false, message: 'Test config not found' });
+    res.json({ success: true, data: config });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/sat/admin/test-configs/:testId/subjects/:subject
+const updateTestConfigSubject = async (req, res) => {
+  try {
+    const { testId, subject } = req.params;
+    if (!['reading_writing', 'math'].includes(subject)) {
+      return res.status(400).json({ success: false, message: 'subject must be reading_writing or math' });
+    }
+    const config = await SatTestConfig.findOneAndUpdate(
+      { testId },
+      { $set: { [`subjects.${subject}`]: req.body } },
+      { new: true, runValidators: true }
+    );
+    if (!config) return res.status(404).json({ success: false, message: 'Test config not found' });
+    res.json({ success: true, data: config });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// PATCH /api/sat/admin/test-configs/:testId/demo-access
+const patchTestDemoAccess = async (req, res) => {
+  try {
+    const { is_demo_accessible } = req.body;
+    if (typeof is_demo_accessible !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'is_demo_accessible must be a boolean' });
+    }
+    const config = await SatTestConfig.findOneAndUpdate(
+      { testId: req.params.testId },
+      { $set: { is_demo_accessible } },
+      { new: true }
+    );
+    if (!config) return res.status(404).json({ success: false, message: 'Test config not found' });
+    res.json({ success: true, data: config });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// DELETE /api/sat/admin/test-configs/:testId  (soft delete)
+const deleteTestConfig = async (req, res) => {
+  try {
+    const config = await SatTestConfig.findOneAndUpdate(
+      { testId: req.params.testId },
+      { $set: { is_active: false } },
+      { new: true }
+    );
+    if (!config) return res.status(404).json({ success: false, message: 'Test config not found' });
+    res.json({ success: true, message: 'Test config deleted' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   bulkUpload,
   getQuestions,
@@ -441,4 +547,11 @@ module.exports = {
   createPracticeConfig,
   getPracticeConfigs,
   updatePracticeConfig,
+  createTestConfig,
+  getTestConfigs,
+  getTestConfigById,
+  updateTestConfig,
+  updateTestConfigSubject,
+  patchTestDemoAccess,
+  deleteTestConfig,
 };
