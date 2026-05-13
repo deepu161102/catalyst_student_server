@@ -1,4 +1,5 @@
 const SatTestSession            = require('../../models/sat/SatTestSession');
+const SatTestAttempt            = require('../../models/sat/SatTestAttempt');
 const SatFullLengthSession      = require('../../models/sat/SatFullLengthSession');
 const SatExamConfig             = require('../../models/sat/SatExamConfig');
 const SatTestConfig             = require('../../models/sat/SatTestConfig');
@@ -98,10 +99,9 @@ const startSession = async (req, res) => {
 
     // ── New unified schema: virtual ID contains a colon ───────────────────────
     if (directConfigId && directConfigId.includes(':')) {
-      const colonIdx   = directConfigId.lastIndexOf(':');
-      const testId     = directConfigId.substring(0, colonIdx);
+      const colonIdx    = directConfigId.lastIndexOf(':');
+      const testId      = directConfigId.substring(0, colonIdx);
       const subjectCode = directConfigId.substring(colonIdx + 1);
-      const subject    = subjectCode === 'math' ? 'math' : 'reading_writing';
 
       const testConfig = await SatTestConfig.findOne({ testId, is_active: true }).lean();
       if (!testConfig) return res.status(404).json({ success: false, message: 'Test config not found' });
@@ -110,46 +110,121 @@ const startSession = async (req, res) => {
         return res.status(403).json({ success: false, message: 'Upgrade to access this test' });
       }
 
-      const subjConfig = testConfig.subjects?.[subject];
-      if (!subjConfig) return res.status(404).json({ success: false, message: `Subject ${subject} not configured in this test` });
+      // ── R&W: create or resume a SatTestAttempt ────────────────────────────
+      if (subjectCode === 'rw') {
+        const rwConfig = testConfig.subjects?.reading_writing;
+        if (!rwConfig) return res.status(404).json({ success: false, message: 'Reading & Writing not configured in this test' });
 
-      const history  = await SatStudentQuestionHistory.findOne({ student_id: req.userId, subject }).lean();
-      const seenIds  = history?.seen_question_ids || [];
+        // Resume an in-progress attempt at M1
+        const existing = await SatTestAttempt.findOne({
+          student_id:     req.userId,
+          test_config_id: testId,
+          status:         'rw_m1_in_progress',
+        }).lean();
 
-      const m1Questions  = await assembleQuestions(subject, subjConfig.module_1, seenIds);
-      const m1Ids        = m1Questions.map(q => q._id);
-      const excludeForM2 = [...seenIds, ...m1Ids];
+        if (existing) {
+          const questions = await SatQuestionBank.find({ _id: { $in: existing.reading_writing.module_1.question_ids } }).lean();
+          return res.json({
+            success:    true,
+            resumed:    true,
+            session_id: existing._id,
+            status:     existing.status,
+            subject:    'reading_writing',
+            module_1: {
+              questions:          stripAnswers(questions),
+              time_limit_minutes: rwConfig.module_1.time_limit_minutes,
+              started_at:         existing.reading_writing.module_1.started_at,
+            },
+          });
+        }
 
-      const [prefetchHard, prefetchEasy] = await Promise.allSettled([
-        assembleQuestions(subject, subjConfig.module_2_hard, excludeForM2),
-        assembleQuestions(subject, subjConfig.module_2_easy, excludeForM2),
-      ]);
+        const history      = await SatStudentQuestionHistory.findOne({ student_id: req.userId, subject: 'reading_writing' }).lean();
+        const seenIds      = history?.seen_question_ids || [];
+        const m1Questions  = await assembleQuestions('reading_writing', rwConfig.module_1, seenIds);
+        const m1Ids        = m1Questions.map(q => q._id);
+        const excludeForM2 = [...seenIds, ...m1Ids];
 
-      const session = await SatTestSession.create({
-        student_id:          req.userId,
-        test_config_id:      testId,
-        test_config_subject: subject,
-        subject,
-        status:              'm1_in_progress',
-        module_1: { question_ids: m1Ids, started_at: new Date() },
-        prefetched: {
-          hard:   prefetchHard.status  === 'fulfilled' ? prefetchHard.value.map(q  => q._id) : [],
-          medium: [],
-          easy:   prefetchEasy.status  === 'fulfilled' ? prefetchEasy.value.map(q  => q._id) : [],
-        },
-      });
+        const [prefetchHard, prefetchEasy] = await Promise.allSettled([
+          assembleQuestions('reading_writing', rwConfig.module_2_hard, excludeForM2),
+          assembleQuestions('reading_writing', rwConfig.module_2_easy, excludeForM2),
+        ]);
 
-      return res.status(201).json({
-        success:    true,
-        session_id: session._id,
-        status:     session.status,
-        subject,
-        module_1: {
-          questions:          stripAnswers(m1Questions),
-          time_limit_minutes: subjConfig.module_1.time_limit_minutes,
-          started_at:         session.module_1.started_at,
-        },
-      });
+        const attempt = await SatTestAttempt.create({
+          student_id:     req.userId,
+          test_config_id: testId,
+          type:           testConfig.type,
+          status:         'rw_m1_in_progress',
+          reading_writing: {
+            module_1:   { question_ids: m1Ids, started_at: new Date() },
+            prefetched: {
+              hard: prefetchHard.status === 'fulfilled' ? prefetchHard.value.map(q => q._id) : [],
+              easy: prefetchEasy.status === 'fulfilled' ? prefetchEasy.value.map(q => q._id) : [],
+            },
+          },
+        });
+
+        return res.status(201).json({
+          success:    true,
+          session_id: attempt._id,
+          status:     attempt.status,
+          subject:    'reading_writing',
+          module_1: {
+            questions:          stripAnswers(m1Questions),
+            time_limit_minutes: rwConfig.module_1.time_limit_minutes,
+            started_at:         attempt.reading_writing.module_1.started_at,
+          },
+        });
+      }
+
+      // ── Math: find the existing attempt (R&W must be done) ────────────────
+      if (subjectCode === 'math') {
+        const mathConfig = testConfig.subjects?.math;
+        if (!mathConfig) return res.status(404).json({ success: false, message: 'Math not configured in this test' });
+
+        const attempt = await SatTestAttempt.findOne({
+          student_id:     req.userId,
+          test_config_id: testId,
+          status:         'rw_done',
+        });
+        if (!attempt) {
+          return res.status(400).json({ success: false, message: 'Reading & Writing must be completed before starting Math' });
+        }
+
+        const history      = await SatStudentQuestionHistory.findOne({ student_id: req.userId, subject: 'math' }).lean();
+        const seenIds      = history?.seen_question_ids || [];
+        const m1Questions  = await assembleQuestions('math', mathConfig.module_1, seenIds);
+        const m1Ids        = m1Questions.map(q => q._id);
+        const excludeForM2 = [...seenIds, ...m1Ids];
+
+        const [prefetchHard, prefetchEasy] = await Promise.allSettled([
+          assembleQuestions('math', mathConfig.module_2_hard, excludeForM2),
+          assembleQuestions('math', mathConfig.module_2_easy, excludeForM2),
+        ]);
+
+        attempt.status = 'math_m1_in_progress';
+        attempt.math = {
+          module_1:   { question_ids: m1Ids, started_at: new Date() },
+          prefetched: {
+            hard: prefetchHard.status === 'fulfilled' ? prefetchHard.value.map(q => q._id) : [],
+            easy: prefetchEasy.status === 'fulfilled' ? prefetchEasy.value.map(q => q._id) : [],
+          },
+        };
+        await attempt.save();
+
+        return res.status(200).json({
+          success:    true,
+          session_id: attempt._id,
+          status:     attempt.status,
+          subject:    'math',
+          module_1: {
+            questions:          stripAnswers(m1Questions),
+            time_limit_minutes: mathConfig.module_1.time_limit_minutes,
+            started_at:         attempt.math.module_1.started_at,
+          },
+        });
+      }
+
+      return res.status(400).json({ success: false, message: 'Invalid subject code in exam_config_id' });
     }
 
     // ── Old schema / assignment flow ──────────────────────────────────────────
@@ -347,10 +422,101 @@ const startFullLengthSession = async (req, res, assignment) => {
   });
 };
 
+// Shared grading helper — returns { gradedAnswers, score, maxScore, percentage }
+const gradeAnswers = (questionIds, answers, questionMap) => {
+  let score = 0;
+  const gradedAnswers = questionIds.map((qId) => {
+    const q        = questionMap[qId.toString()];
+    const answer   = answers.find((a) => a.question_id?.toString() === qId.toString());
+    const selected  = answer?.selected?.trim() || null;
+    const correct   = q?.correct_answer?.trim();
+    const isCorrect = selected !== null && selected.toLowerCase() === correct?.toLowerCase();
+    const pts       = isCorrect ? (q?.points || 1) : 0;
+    score += pts;
+    return { question_id: qId, selected, is_correct: isCorrect, points_earned: pts };
+  });
+  const maxScore   = questionIds.reduce((sum, qId) => sum + (questionMap[qId.toString()]?.points || 1), 0);
+  const percentage = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+  return { gradedAnswers, score, maxScore, percentage };
+};
+
+// Shared breakdown builder
+const buildBreakdownFromMap = (gradedAnswers, questionMap) =>
+  gradedAnswers.map((a) => {
+    const q = questionMap[a.question_id.toString()];
+    return {
+      question_id:    a.question_id,
+      stem:           q?.stem,
+      selected:       a.selected,
+      correct_answer: q?.correct_answer,
+      is_correct:     a.is_correct,
+      explanation:    q?.explanation,
+      topic:          q?.topic,
+      difficulty:     q?.difficulty,
+    };
+  });
+
 // ── POST /api/sat/test/:sessionId/module/1/submit ─────────────────────────────
 // Body: { answers: [{ question_id, selected }] }
 const submitModule1 = async (req, res) => {
   try {
+    const { answers = [] } = req.body;
+    const now = new Date();
+
+    // ── Try SatTestAttempt first (new unified schema) ─────────────────────
+    const attempt = await SatTestAttempt.findOne({
+      _id:        req.params.sessionId,
+      student_id: req.userId,
+      status:     { $in: ['rw_m1_in_progress', 'math_m1_in_progress'] },
+    });
+
+    if (attempt) {
+      const isRW      = attempt.status === 'rw_m1_in_progress';
+      const subject   = isRW ? 'reading_writing' : 'math';
+      const subjData  = isRW ? attempt.reading_writing : attempt.math;
+      const qIds      = subjData.module_1.question_ids;
+
+      const questions   = await SatQuestionBank.find({ _id: { $in: qIds } }).lean();
+      const questionMap = Object.fromEntries(questions.map(q => [q._id.toString(), q]));
+      const { gradedAnswers, score, maxScore, percentage } = gradeAnswers(qIds, answers, questionMap);
+
+      // Load subjConfig for adaptive threshold
+      const testConfig  = await SatTestConfig.findOne({ testId: attempt.test_config_id }).lean();
+      const subjConfig  = testConfig?.subjects?.[subject];
+      const threshold   = subjConfig?.adaptive_threshold ?? 50;
+      const tier        = percentage >= threshold ? 'hard' : 'easy';
+      const prefetchIds = subjData.prefetched?.[tier] || [];
+
+      if (!prefetchIds.length) {
+        return res.status(500).json({ success: false, message: `Prefetched questions for ${tier} tier are unavailable. Contact admin.` });
+      }
+
+      const nextStatus = isRW ? 'rw_m1_complete' : 'math_m1_complete';
+      const m1Path     = isRW ? 'reading_writing.module_1' : 'math.module_1';
+      const m2Path     = isRW ? 'reading_writing.module_2' : 'math.module_2';
+
+      await SatTestAttempt.findByIdAndUpdate(attempt._id, {
+        status:                      nextStatus,
+        [`${m1Path}.answers`]:       gradedAnswers,
+        [`${m1Path}.score`]:         score,
+        [`${m1Path}.max_score`]:     maxScore,
+        [`${m1Path}.percentage`]:    percentage,
+        [`${m1Path}.submitted_at`]:  now,
+        [`${m2Path}.tier`]:          tier,
+        [`${m2Path}.question_ids`]:  prefetchIds,
+      });
+
+      await recordSeenQuestions(req.userId, subject, qIds);
+
+      return res.json({
+        success:  true,
+        module_1: { score, max_score: maxScore, percentage, submitted_at: now },
+        adaptive: { tier, threshold },
+        breakdown: buildBreakdownFromMap(gradedAnswers, questionMap),
+      });
+    }
+
+    // ── Fall back to SatTestSession (old schema) ──────────────────────────
     const session = await SatTestSession.findOne({
       _id:        req.params.sessionId,
       student_id: req.userId,
@@ -358,29 +524,11 @@ const submitModule1 = async (req, res) => {
     });
     if (!session) return res.status(404).json({ success: false, message: 'Active Module 1 session not found' });
 
-    const { answers = [] } = req.body;
-    const examConfig = await loadConfigForSession(session);
-
-    // Fetch questions to grade
-    const questions = await SatQuestionBank.find({ _id: { $in: session.module_1.question_ids } }).lean();
+    const examConfig  = await loadConfigForSession(session);
+    const questions   = await SatQuestionBank.find({ _id: { $in: session.module_1.question_ids } }).lean();
     const questionMap = Object.fromEntries(questions.map((q) => [q._id.toString(), q]));
+    const { gradedAnswers, score, maxScore, percentage } = gradeAnswers(session.module_1.question_ids, answers, questionMap);
 
-    let score = 0;
-    const gradedAnswers = session.module_1.question_ids.map((qId) => {
-      const q        = questionMap[qId.toString()];
-      const answer   = answers.find((a) => a.question_id?.toString() === qId.toString());
-      const selected  = answer?.selected?.trim() || null;
-      const correct   = q?.correct_answer?.trim();
-      const isCorrect = selected !== null && selected.toLowerCase() === correct?.toLowerCase();
-      const pts       = isCorrect ? (q?.points || 1) : 0;
-      score += pts;
-      return { question_id: qId, selected, is_correct: isCorrect, points_earned: pts };
-    });
-
-    const maxScore  = questions.reduce((sum, q) => sum + (q.points || 1), 0);
-    const percentage = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
-
-    // Determine adaptive tier using dual thresholds
     let tier;
     if (percentage >= examConfig.adaptive_threshold) {
       tier = 'hard';
@@ -390,16 +538,13 @@ const submitModule1 = async (req, res) => {
       tier = 'easy';
     }
 
-    // Validate prefetched set for the chosen tier exists
     const prefetchedIds = session.prefetched[tier];
     if (!prefetchedIds?.length) {
       return res.status(500).json({ success: false, message: `Prefetched questions for ${tier} tier are unavailable. Contact admin.` });
     }
 
-    const now = new Date();
-
     await SatTestSession.findByIdAndUpdate(session._id, {
-      status: 'm1_complete',
+      status:                  'm1_complete',
       'module_1.answers':      gradedAnswers,
       'module_1.score':        score,
       'module_1.max_score':    maxScore,
@@ -409,29 +554,13 @@ const submitModule1 = async (req, res) => {
       'module_2.question_ids': prefetchedIds,
     });
 
-    // Append M1 questions to student history
     await recordSeenQuestions(req.userId, session.subject, session.module_1.question_ids);
 
-    // Per-question breakdown with correct answers revealed
-    const breakdown = gradedAnswers.map((a) => {
-      const q = questionMap[a.question_id.toString()];
-      return {
-        question_id:    a.question_id,
-        stem:           q?.stem,
-        selected:       a.selected,
-        correct_answer: q?.correct_answer,
-        is_correct:     a.is_correct,
-        explanation:    q?.explanation,
-        topic:          q?.topic,
-        difficulty:     q?.difficulty,
-      };
-    });
-
     res.json({
-      success: true,
+      success:  true,
       module_1: { score, max_score: maxScore, percentage, submitted_at: now },
       adaptive: { tier, threshold: examConfig.adaptive_threshold },
-      breakdown,
+      breakdown: buildBreakdownFromMap(gradedAnswers, questionMap),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -441,6 +570,47 @@ const submitModule1 = async (req, res) => {
 // ── GET /api/sat/test/:sessionId/module/2 ─────────────────────────────────────
 const getModule2 = async (req, res) => {
   try {
+    // ── Try SatTestAttempt first ──────────────────────────────────────────
+    const attempt = await SatTestAttempt.findOne({
+      _id:        req.params.sessionId,
+      student_id: req.userId,
+      status:     { $in: ['rw_m1_complete', 'rw_m2_in_progress', 'math_m1_complete', 'math_m2_in_progress'] },
+    });
+
+    if (attempt) {
+      const isRW     = attempt.status === 'rw_m1_complete' || attempt.status === 'rw_m2_in_progress';
+      const subject  = isRW ? 'reading_writing' : 'math';
+      const subjData = isRW ? attempt.reading_writing : attempt.math;
+
+      const testConfig = await SatTestConfig.findOne({ testId: attempt.test_config_id }).lean();
+      const subjConfig = testConfig?.subjects?.[subject];
+      const m2Cfg      = subjData.module_2?.tier === 'hard' ? subjConfig?.module_2_hard : subjConfig?.module_2_easy;
+
+      const questions = await SatQuestionBank.find({ _id: { $in: subjData.module_2.question_ids } }).lean();
+
+      const m2Path     = isRW ? 'reading_writing.module_2' : 'math.module_2';
+      const nextStatus = isRW ? 'rw_m2_in_progress' : 'math_m2_in_progress';
+
+      if (attempt.status === 'rw_m1_complete' || attempt.status === 'math_m1_complete') {
+        await SatTestAttempt.findByIdAndUpdate(attempt._id, {
+          status:                    nextStatus,
+          [`${m2Path}.started_at`]: new Date(),
+        });
+      }
+
+      return res.json({
+        success:    true,
+        session_id: attempt._id,
+        module_2: {
+          tier:               subjData.module_2.tier,
+          questions:          stripAnswers(questions),
+          time_limit_minutes: m2Cfg?.time_limit_minutes,
+          started_at:         subjData.module_2.started_at || new Date(),
+        },
+      });
+    }
+
+    // ── Fall back to SatTestSession ───────────────────────────────────────
     const session = await SatTestSession.findOne({
       _id:        req.params.sessionId,
       student_id: req.userId,
@@ -450,18 +620,17 @@ const getModule2 = async (req, res) => {
 
     const examConfig = await loadConfigForSession(session);
     const m2Config   = session.module_2.tier === 'hard' ? examConfig.module_2_hard : examConfig.module_2_easy;
-
-    const questions = await SatQuestionBank.find({ _id: { $in: session.module_2.question_ids } }).lean();
+    const questions  = await SatQuestionBank.find({ _id: { $in: session.module_2.question_ids } }).lean();
 
     if (session.status === 'm1_complete') {
       await SatTestSession.findByIdAndUpdate(session._id, {
-        status:                 'm2_in_progress',
+        status:                'm2_in_progress',
         'module_2.started_at': new Date(),
       });
     }
 
     res.json({
-      success: true,
+      success:    true,
       session_id: session._id,
       module_2: {
         tier:               session.module_2.tier,
@@ -479,6 +648,70 @@ const getModule2 = async (req, res) => {
 // Body: { answers: [{ question_id, selected }] }
 const submitModule2 = async (req, res) => {
   try {
+    const { answers = [] } = req.body;
+    const now = new Date();
+
+    // ── Try SatTestAttempt first ──────────────────────────────────────────
+    const attempt = await SatTestAttempt.findOne({
+      _id:        req.params.sessionId,
+      student_id: req.userId,
+      status:     { $in: ['rw_m2_in_progress', 'math_m2_in_progress'] },
+    });
+
+    if (attempt) {
+      const isRW      = attempt.status === 'rw_m2_in_progress';
+      const subject   = isRW ? 'reading_writing' : 'math';
+      const subjData  = isRW ? attempt.reading_writing : attempt.math;
+      const qIds      = subjData.module_2.question_ids;
+
+      const questions   = await SatQuestionBank.find({ _id: { $in: qIds } }).lean();
+      const questionMap = Object.fromEntries(questions.map(q => [q._id.toString(), q]));
+      const { gradedAnswers, score, maxScore, percentage } = gradeAnswers(qIds, answers, questionMap);
+
+      const m1Score  = subjData.module_1?.score || 0;
+      const m2Path   = isRW ? 'reading_writing.module_2' : 'math.module_2';
+      const totPath  = isRW ? 'reading_writing.total_score' : 'math.total_score';
+
+      if (isRW) {
+        // R&W done — move to rw_done, do NOT compute overall yet
+        await SatTestAttempt.findByIdAndUpdate(attempt._id, {
+          status:                     'rw_done',
+          [`${m2Path}.answers`]:      gradedAnswers,
+          [`${m2Path}.score`]:        score,
+          [`${m2Path}.max_score`]:    maxScore,
+          [`${m2Path}.percentage`]:   percentage,
+          [`${m2Path}.submitted_at`]: now,
+          [totPath]:                  m1Score + score,
+        });
+      } else {
+        // Math done — whole attempt complete, compute overall_score
+        const rwTotal      = attempt.reading_writing?.total_score || 0;
+        const mathTotal    = m1Score + score;
+        const overallScore = rwTotal + mathTotal;
+
+        await SatTestAttempt.findByIdAndUpdate(attempt._id, {
+          status:                     'complete',
+          [`${m2Path}.answers`]:      gradedAnswers,
+          [`${m2Path}.score`]:        score,
+          [`${m2Path}.max_score`]:    maxScore,
+          [`${m2Path}.percentage`]:   percentage,
+          [`${m2Path}.submitted_at`]: now,
+          [totPath]:                  mathTotal,
+          overall_score:              overallScore,
+        });
+      }
+
+      await recordSeenQuestions(req.userId, subject, qIds);
+
+      return res.json({
+        success:  true,
+        module_2: { score, max_score: maxScore, percentage, tier: subjData.module_2.tier, submitted_at: now },
+        total_score: m1Score + score,
+        breakdown: buildBreakdownFromMap(gradedAnswers, questionMap),
+      });
+    }
+
+    // ── Fall back to SatTestSession ───────────────────────────────────────
     const session = await SatTestSession.findOne({
       _id:        req.params.sessionId,
       student_id: req.userId,
@@ -486,28 +719,10 @@ const submitModule2 = async (req, res) => {
     });
     if (!session) return res.status(404).json({ success: false, message: 'Active Module 2 session not found' });
 
-    const { answers = [] } = req.body;
-
-    const questions  = await SatQuestionBank.find({ _id: { $in: session.module_2.question_ids } }).lean();
+    const questions   = await SatQuestionBank.find({ _id: { $in: session.module_2.question_ids } }).lean();
     const questionMap = Object.fromEntries(questions.map((q) => [q._id.toString(), q]));
+    const { gradedAnswers, score, maxScore, percentage } = gradeAnswers(session.module_2.question_ids, answers, questionMap);
 
-    let score = 0;
-    const gradedAnswers = session.module_2.question_ids.map((qId) => {
-      const q        = questionMap[qId.toString()];
-      const answer   = answers.find((a) => a.question_id?.toString() === qId.toString());
-      const selected  = answer?.selected?.trim() || null;
-      const correct   = q?.correct_answer?.trim();
-      const isCorrect = selected !== null && selected.toLowerCase() === correct?.toLowerCase();
-      const pts       = isCorrect ? (q?.points || 1) : 0;
-      score += pts;
-      return { question_id: qId, selected, is_correct: isCorrect, points_earned: pts };
-    });
-
-    const maxScore   = questions.reduce((sum, q) => sum + (q.points || 1), 0);
-    const percentage = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
-    const now        = new Date();
-
-    // Reload M1 data for total
     const updated = await SatTestSession.findByIdAndUpdate(
       session._id,
       {
@@ -522,48 +737,28 @@ const submitModule2 = async (req, res) => {
       { new: true }
     );
 
-    // Append M2 questions to student history
     await recordSeenQuestions(req.userId, session.subject, session.module_2.question_ids);
-
-    // Update assignment status
     await SatAssignment.findByIdAndUpdate(session.assignment_id, { status: 'completed' });
 
-    // If part of a full length session, check if both subjects are complete
     if (session.full_length_session_id) {
       const flSession = await SatFullLengthSession.findById(session.full_length_session_id);
       if (flSession) {
         const mathSession = await SatTestSession.findById(flSession.math_session_id).lean();
         const rwSession   = await SatTestSession.findById(flSession.rw_session_id).lean();
-        const bothDone    = mathSession?.status === 'complete' && rwSession?.status === 'complete';
-        if (bothDone) {
-          const totalScore = (mathSession.total_score || 0) + (rwSession.total_score || 0);
+        if (mathSession?.status === 'complete' && rwSession?.status === 'complete') {
           await SatFullLengthSession.findByIdAndUpdate(session.full_length_session_id, {
-            status: 'complete',
-            total_score: totalScore,
+            status:      'complete',
+            total_score: (mathSession.total_score || 0) + (rwSession.total_score || 0),
           });
         }
       }
     }
 
-    const breakdown = gradedAnswers.map((a) => {
-      const q = questionMap[a.question_id.toString()];
-      return {
-        question_id:    a.question_id,
-        stem:           q?.stem,
-        selected:       a.selected,
-        correct_answer: q?.correct_answer,
-        is_correct:     a.is_correct,
-        explanation:    q?.explanation,
-        topic:          q?.topic,
-        difficulty:     q?.difficulty,
-      };
-    });
-
     res.json({
-      success: true,
-      module_2: { score, max_score: maxScore, percentage, tier: session.module_2.tier, submitted_at: now },
+      success:     true,
+      module_2:    { score, max_score: maxScore, percentage, tier: session.module_2.tier, submitted_at: now },
       total_score: updated.total_score,
-      breakdown,
+      breakdown:   buildBreakdownFromMap(gradedAnswers, questionMap),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -573,6 +768,74 @@ const submitModule2 = async (req, res) => {
 // ── GET /api/sat/test/:sessionId/results ──────────────────────────────────────
 const getResults = async (req, res) => {
   try {
+    // ── Try SatTestAttempt first ──────────────────────────────────────────
+    const attempt = await SatTestAttempt.findOne({
+      _id:        req.params.sessionId,
+      student_id: req.userId,
+      status:     'complete',
+    }).lean();
+
+    if (attempt) {
+      const allIds = [
+        ...(attempt.reading_writing?.module_1?.question_ids || []),
+        ...(attempt.reading_writing?.module_2?.question_ids || []),
+        ...(attempt.math?.module_1?.question_ids || []),
+        ...(attempt.math?.module_2?.question_ids || []),
+      ];
+      const questions   = await SatQuestionBank.find({ _id: { $in: allIds } }).lean();
+      const questionMap = Object.fromEntries(questions.map(q => [q._id.toString(), q]));
+
+      const buildBreakdown = (answers) =>
+        (answers || []).map(a => {
+          const q = questionMap[a.question_id?.toString()];
+          return {
+            question_id:    a.question_id,
+            stem:           q?.stem,
+            option_a:       q?.option_a,
+            option_b:       q?.option_b,
+            option_c:       q?.option_c,
+            option_d:       q?.option_d,
+            topic:          q?.topic,
+            sub_topic:      q?.sub_topic,
+            difficulty:     q?.difficulty,
+            points:         q?.points,
+            selected:       a.selected,
+            correct_answer: q?.correct_answer,
+            is_correct:     a.is_correct,
+            explanation:    q?.explanation,
+          };
+        });
+
+      const buildSubjectResult = (subj) => ({
+        module_1: {
+          score:      subj?.module_1?.score,
+          max_score:  subj?.module_1?.max_score,
+          percentage: subj?.module_1?.percentage,
+          breakdown:  buildBreakdown(subj?.module_1?.answers),
+        },
+        module_2: {
+          tier:       subj?.module_2?.tier,
+          score:      subj?.module_2?.score,
+          max_score:  subj?.module_2?.max_score,
+          percentage: subj?.module_2?.percentage,
+          breakdown:  buildBreakdown(subj?.module_2?.answers),
+        },
+        total_score: subj?.total_score,
+      });
+
+      return res.json({
+        success: true,
+        data: {
+          session_id:      attempt._id,
+          is_unified:      true,
+          overall_score:   attempt.overall_score,
+          reading_writing: buildSubjectResult(attempt.reading_writing),
+          math:            buildSubjectResult(attempt.math),
+        },
+      });
+    }
+
+    // ── Fall back to SatTestSession ───────────────────────────────────────
     const session = await SatTestSession.findOne({
       _id:        req.params.sessionId,
       student_id: req.userId,
@@ -584,7 +847,7 @@ const getResults = async (req, res) => {
       ...session.module_1.question_ids,
       ...(session.module_2?.question_ids || []),
     ];
-    const questions  = await SatQuestionBank.find({ _id: { $in: allIds } }).lean();
+    const questions   = await SatQuestionBank.find({ _id: { $in: allIds } }).lean();
     const questionMap = Object.fromEntries(questions.map((q) => [q._id.toString(), q]));
 
     const buildBreakdown = (answers) =>
@@ -608,7 +871,6 @@ const getResults = async (req, res) => {
         };
       });
 
-    // Per-topic summary
     const topicSummary = {};
     [...(session.module_1.answers || []), ...(session.module_2?.answers || [])].forEach((a) => {
       const q     = questionMap[a.question_id?.toString()];
@@ -898,14 +1160,56 @@ const getPracticeHistory = async (req, res) => {
   }
 };
 
-// GET /api/sat/test/history — completed SatTestSession records for the student
+// GET /api/sat/test/history — completed sessions for the student (both collections)
 const getHistory = async (req, res) => {
   try {
-    const sessions = await SatTestSession.find({ student_id: req.userId, status: 'complete' })
-      .select('exam_config_id subject status total_score module_1.score module_1.max_score module_2.score module_2.max_score createdAt')
-      .sort({ createdAt: -1 })
-      .lean();
-    res.json({ success: true, count: sessions.length, data: sessions });
+    const [sessions, attempts] = await Promise.all([
+      SatTestSession.find({ student_id: req.userId, status: 'complete' })
+        .select('exam_config_id test_config_id test_config_subject subject status total_score module_1.score module_1.max_score module_2.score module_2.max_score createdAt')
+        .sort({ createdAt: -1 })
+        .lean(),
+      SatTestAttempt.find({ student_id: req.userId, status: 'complete' })
+        .select('test_config_id type status overall_score reading_writing.total_score reading_writing.module_1.score reading_writing.module_1.max_score reading_writing.module_2.score reading_writing.module_2.max_score math.total_score math.module_1.score math.module_1.max_score math.module_2.score math.module_2.max_score createdAt')
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+
+    // Normalize old SatTestSession entries (add synthetic exam_config_id for new-schema sessions)
+    const normalizedSessions = sessions.map(s => {
+      if (s.test_config_id && !s.exam_config_id) {
+        const code = s.test_config_subject === 'math' ? 'math' : 'rw';
+        return { ...s, exam_config_id: `${s.test_config_id}:${code}` };
+      }
+      return s;
+    });
+
+    // Expand each SatTestAttempt into two synthetic entries (one per subject)
+    // so existing frontend matchId logic works unchanged.
+    const normalizedAttempts = attempts.flatMap(a => [
+      {
+        _id:           a._id,
+        exam_config_id: `${a.test_config_id}:rw`,
+        status:        'complete',
+        total_score:   a.reading_writing?.total_score,
+        module_1:      { score: a.reading_writing?.module_1?.score, max_score: a.reading_writing?.module_1?.max_score },
+        module_2:      { score: a.reading_writing?.module_2?.score, max_score: a.reading_writing?.module_2?.max_score },
+        createdAt:     a.createdAt,
+      },
+      {
+        _id:           a._id,
+        exam_config_id: `${a.test_config_id}:math`,
+        status:        'complete',
+        total_score:   a.math?.total_score,
+        module_1:      { score: a.math?.module_1?.score, max_score: a.math?.module_1?.max_score },
+        module_2:      { score: a.math?.module_2?.score, max_score: a.math?.module_2?.max_score },
+        createdAt:     a.createdAt,
+      },
+    ]);
+
+    const data = [...normalizedSessions, ...normalizedAttempts]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json({ success: true, count: data.length, data });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
