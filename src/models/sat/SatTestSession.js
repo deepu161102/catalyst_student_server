@@ -9,10 +9,14 @@ const answerSchema = {
 
 const satTestSessionSchema = new mongoose.Schema(
   {
-    student_id:     { type: mongoose.Schema.Types.ObjectId, ref: 'Student', required: true },
-    exam_config_id: { type: mongoose.Schema.Types.ObjectId, ref: 'SatExamConfig', required: true },
-    assignment_id:  { type: mongoose.Schema.Types.ObjectId, ref: 'SatAssignment' },
-    subject:        { type: String, enum: ['math', 'reading_writing'], required: true },
+    student_id:          { type: mongoose.Schema.Types.ObjectId, ref: 'Student', required: true },
+    // Old schema: references SatExamConfig (per-subject doc)
+    exam_config_id:      { type: mongoose.Schema.Types.ObjectId, ref: 'SatExamConfig' },
+    // New schema: references unified SatTestConfig by UUID
+    test_config_id:      { type: String },
+    test_config_subject: { type: String, enum: ['math', 'reading_writing'] },
+    assignment_id:       { type: mongoose.Schema.Types.ObjectId, ref: 'SatAssignment' },
+    subject:             { type: String, enum: ['math', 'reading_writing'], required: true },
     status: {
       type:    String,
       enum:    ['m1_in_progress', 'm1_complete', 'm2_in_progress', 'complete'],

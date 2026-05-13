@@ -20,6 +20,13 @@ const {
   createPracticeConfig,
   getPracticeConfigs,
   updatePracticeConfig,
+  createTestConfig,
+  getTestConfigs,
+  getTestConfigById,
+  updateTestConfig,
+  updateTestConfigSubject,
+  patchTestDemoAccess,
+  deleteTestConfig,
 } = require('../../controllers/sat/satAdminController');
 
 const upload = multer({
@@ -64,5 +71,19 @@ router.route('/practice-configs')
   .post(createPracticeConfig);
 
 router.put('/practice-configs/:id', updatePracticeConfig);
+
+// Unified test configs (mock + diagnostic) — new single-document schema
+router.route('/test-configs')
+  .get(getTestConfigs)
+  .post(createTestConfig);
+
+// Specific-subject update and demo-access patch must come before the :testId wildcard
+router.put('/test-configs/:testId/subjects/:subject', updateTestConfigSubject);
+router.patch('/test-configs/:testId/demo-access',     patchTestDemoAccess);
+
+router.route('/test-configs/:testId')
+  .get(getTestConfigById)
+  .put(updateTestConfig)
+  .delete(deleteTestConfig);
 
 module.exports = router;

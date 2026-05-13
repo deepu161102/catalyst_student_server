@@ -1,6 +1,7 @@
 const SatTestSession            = require('../../models/sat/SatTestSession');
 const SatFullLengthSession      = require('../../models/sat/SatFullLengthSession');
 const SatExamConfig             = require('../../models/sat/SatExamConfig');
+const SatTestConfig             = require('../../models/sat/SatTestConfig');
 const SatFullLengthExamConfig   = require('../../models/sat/SatFullLengthExamConfig');
 const SatPracticeTestConfig     = require('../../models/sat/SatPracticeTestConfig');
 const SatPracticeSession        = require('../../models/sat/SatPracticeSession');
@@ -8,6 +9,26 @@ const SatAssignment             = require('../../models/sat/SatAssignment');
 const SatQuestionBank           = require('../../models/sat/SatQuestionBank');
 const SatStudentQuestionHistory = require('../../models/sat/SatStudentQuestionHistory');
 const { assembleQuestions, assemblePracticeQuestions, stripAnswers } = require('../../utils/satAssembly');
+
+// Returns config data shaped like SatExamConfig.lean() regardless of which schema the session uses.
+// New-schema sessions have test_config_id set; old-schema sessions have exam_config_id.
+const loadConfigForSession = async (session) => {
+  if (session.test_config_id) {
+    const tc = await SatTestConfig.findOne({ testId: session.test_config_id }).lean();
+    const subj = tc?.subjects?.[session.test_config_subject];
+    if (!subj) return null;
+    return {
+      subject:                   session.test_config_subject,
+      adaptive_threshold:        subj.adaptive_threshold,
+      adaptive_threshold_medium: 100, // disables medium tier — new schema has only easy/hard
+      module_2_medium:           null,
+      module_2_hard:             subj.module_2_hard,
+      module_2_easy:             subj.module_2_easy,
+      is_demo_accessible:        tc.is_demo_accessible,
+    };
+  }
+  return SatExamConfig.findById(session.exam_config_id).lean();
+};
 
 // Appends question IDs to the student's seen history for a subject
 const recordSeenQuestions = async (studentId, subject, questionIds) => {
@@ -18,16 +39,47 @@ const recordSeenQuestions = async (studentId, subject, questionIds) => {
   );
 };
 
-// ── POST /api/sat/test/start ──────────────────────────────────────────────────
 // ── GET /api/sat/test/configs ─────────────────────────────────────────────────
-// Returns all active mock/diagnostic exam configs for student self-serve browsing
+// Returns active exam configs from BOTH schemas.
+// New SatTestConfig docs are flattened to per-subject entries so the student
+// portal (which groups by series name) works without any frontend changes.
+// Virtual _id format for new configs: "{testId}:rw" or "{testId}:math"
 const listExamConfigs = async (req, res) => {
   try {
-    const configs = await SatExamConfig.find({ is_active: true })
-      .select('name subject type adaptive_threshold module_1 is_demo_accessible')
-      .sort({ subject: 1, type: 1, name: 1 })
-      .lean();
-    res.json({ success: true, data: configs });
+    const [oldConfigs, newTestConfigs] = await Promise.all([
+      SatExamConfig.find({ is_active: true })
+        .select('name subject type adaptive_threshold module_1 is_demo_accessible')
+        .sort({ subject: 1, type: 1, name: 1 })
+        .lean(),
+      SatTestConfig.find({ is_active: true })
+        .select('testId name type subjects is_demo_accessible')
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+
+    const flattenedNew = newTestConfigs.flatMap(tc => {
+      const entries = [];
+      const pairs = [
+        { subjectKey: 'reading_writing', code: 'rw',   label: 'Reading & Writing' },
+        { subjectKey: 'math',            code: 'math',  label: 'Math'              },
+      ];
+      for (const { subjectKey, code, label } of pairs) {
+        const subj = tc.subjects?.[subjectKey];
+        if (!subj) continue;
+        entries.push({
+          _id:                `${tc.testId}:${code}`,
+          name:               `${tc.name} — ${label}`,
+          subject:            subjectKey,
+          type:               tc.type,
+          adaptive_threshold: subj.adaptive_threshold,
+          module_1:           subj.module_1,
+          is_demo_accessible: tc.is_demo_accessible,
+        });
+      }
+      return entries;
+    });
+
+    res.json({ success: true, data: [...oldConfigs, ...flattenedNew] });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -35,6 +87,8 @@ const listExamConfigs = async (req, res) => {
 
 // ── POST /api/sat/test/start ──────────────────────────────────────────────────
 // Body: { assignment_id } OR { exam_config_id }
+// exam_config_id may be a real MongoDB ObjectId (old schema) or a virtual
+// "{testId}:rw" / "{testId}:math" string (new unified schema).
 const startSession = async (req, res) => {
   try {
     const { assignment_id, exam_config_id: directConfigId } = req.body;
@@ -42,11 +96,67 @@ const startSession = async (req, res) => {
       return res.status(400).json({ success: false, message: 'assignment_id or exam_config_id is required' });
     }
 
+    // ── New unified schema: virtual ID contains a colon ───────────────────────
+    if (directConfigId && directConfigId.includes(':')) {
+      const colonIdx   = directConfigId.lastIndexOf(':');
+      const testId     = directConfigId.substring(0, colonIdx);
+      const subjectCode = directConfigId.substring(colonIdx + 1);
+      const subject    = subjectCode === 'math' ? 'math' : 'reading_writing';
+
+      const testConfig = await SatTestConfig.findOne({ testId, is_active: true }).lean();
+      if (!testConfig) return res.status(404).json({ success: false, message: 'Test config not found' });
+
+      if (req.userRole === 'guest' && !testConfig.is_demo_accessible) {
+        return res.status(403).json({ success: false, message: 'Upgrade to access this test' });
+      }
+
+      const subjConfig = testConfig.subjects?.[subject];
+      if (!subjConfig) return res.status(404).json({ success: false, message: `Subject ${subject} not configured in this test` });
+
+      const history  = await SatStudentQuestionHistory.findOne({ student_id: req.userId, subject }).lean();
+      const seenIds  = history?.seen_question_ids || [];
+
+      const m1Questions  = await assembleQuestions(subject, subjConfig.module_1, seenIds);
+      const m1Ids        = m1Questions.map(q => q._id);
+      const excludeForM2 = [...seenIds, ...m1Ids];
+
+      const [prefetchHard, prefetchEasy] = await Promise.allSettled([
+        assembleQuestions(subject, subjConfig.module_2_hard, excludeForM2),
+        assembleQuestions(subject, subjConfig.module_2_easy, excludeForM2),
+      ]);
+
+      const session = await SatTestSession.create({
+        student_id:          req.userId,
+        test_config_id:      testId,
+        test_config_subject: subject,
+        subject,
+        status:              'm1_in_progress',
+        module_1: { question_ids: m1Ids, started_at: new Date() },
+        prefetched: {
+          hard:   prefetchHard.status  === 'fulfilled' ? prefetchHard.value.map(q  => q._id) : [],
+          medium: [],
+          easy:   prefetchEasy.status  === 'fulfilled' ? prefetchEasy.value.map(q  => q._id) : [],
+        },
+      });
+
+      return res.status(201).json({
+        success:    true,
+        session_id: session._id,
+        status:     session.status,
+        subject,
+        module_1: {
+          questions:          stripAnswers(m1Questions),
+          time_limit_minutes: subjConfig.module_1.time_limit_minutes,
+          started_at:         session.module_1.started_at,
+        },
+      });
+    }
+
+    // ── Old schema / assignment flow ──────────────────────────────────────────
     let examConfig;
     let assignmentDoc = null;
 
     if (assignment_id) {
-      // Assignment-based flow (legacy — kept for backward compat)
       assignmentDoc = await SatAssignment.findOne({
         _id:        assignment_id,
         student_id: req.userId,
@@ -64,7 +174,7 @@ const startSession = async (req, res) => {
         const existing = await SatTestSession.findById(assignmentDoc.session_id).lean();
         if (existing) {
           const questions = await SatQuestionBank.find({ _id: { $in: existing.module_1.question_ids } }).lean();
-          const cfg = await SatExamConfig.findById(existing.exam_config_id).lean();
+          const cfg = await loadConfigForSession(existing);
           return res.json({
             success:    true,
             resumed:    true,
@@ -82,7 +192,6 @@ const startSession = async (req, res) => {
 
       examConfig = await SatExamConfig.findById(assignmentDoc.exam_config_id);
     } else {
-      // Direct / self-serve flow — no assignment required
       examConfig = await SatExamConfig.findById(directConfigId);
     }
 
@@ -90,21 +199,15 @@ const startSession = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Exam config not found' });
     }
 
-    // Guest users can only start demo-accessible tests
     if (req.userRole === 'guest' && !examConfig.is_demo_accessible) {
       return res.status(403).json({ success: false, message: 'Upgrade to access this test' });
     }
 
-    // Get student's question history to avoid repeats
-    const history = await SatStudentQuestionHistory.findOne({
-      student_id: req.userId,
-      subject:    examConfig.subject,
-    }).lean();
-    const seenIds = history?.seen_question_ids || [];
+    const history  = await SatStudentQuestionHistory.findOne({ student_id: req.userId, subject: examConfig.subject }).lean();
+    const seenIds  = history?.seen_question_ids || [];
 
-    // Assemble M1 and pre-fetch all M2 tiers in parallel
     const m1Questions  = await assembleQuestions(examConfig.subject, examConfig.module_1, seenIds);
-    const m1Ids        = m1Questions.map((q) => q._id);
+    const m1Ids        = m1Questions.map(q => q._id);
     const excludeForM2 = [...seenIds, ...m1Ids];
 
     const prefetchJobs = [
@@ -114,7 +217,6 @@ const startSession = async (req, res) => {
         : Promise.resolve([]),
       assembleQuestions(examConfig.subject, examConfig.module_2_easy, excludeForM2),
     ];
-
     const [prefetchHard, prefetchMedium, prefetchEasy] = await Promise.allSettled(prefetchJobs);
 
     const session = await SatTestSession.create({
@@ -123,22 +225,16 @@ const startSession = async (req, res) => {
       assignment_id:  assignmentDoc?._id,
       subject:        examConfig.subject,
       status:         'm1_in_progress',
-      module_1: {
-        question_ids: m1Ids,
-        started_at:   new Date(),
-      },
+      module_1: { question_ids: m1Ids, started_at: new Date() },
       prefetched: {
-        hard:   prefetchHard.status   === 'fulfilled' ? prefetchHard.value.map((q)   => q._id) : [],
-        medium: prefetchMedium.status === 'fulfilled' ? prefetchMedium.value.map((q) => q._id) : [],
-        easy:   prefetchEasy.status   === 'fulfilled' ? prefetchEasy.value.map((q)   => q._id) : [],
+        hard:   prefetchHard.status   === 'fulfilled' ? prefetchHard.value.map(q   => q._id) : [],
+        medium: prefetchMedium.status === 'fulfilled' ? prefetchMedium.value.map(q => q._id) : [],
+        easy:   prefetchEasy.status   === 'fulfilled' ? prefetchEasy.value.map(q   => q._id) : [],
       },
     });
 
     if (assignmentDoc) {
-      await SatAssignment.findByIdAndUpdate(assignmentDoc._id, {
-        status:     'in_progress',
-        session_id: session._id,
-      });
+      await SatAssignment.findByIdAndUpdate(assignmentDoc._id, { status: 'in_progress', session_id: session._id });
     }
 
     res.status(201).json({
@@ -263,7 +359,7 @@ const submitModule1 = async (req, res) => {
     if (!session) return res.status(404).json({ success: false, message: 'Active Module 1 session not found' });
 
     const { answers = [] } = req.body;
-    const examConfig = await SatExamConfig.findById(session.exam_config_id).lean();
+    const examConfig = await loadConfigForSession(session);
 
     // Fetch questions to grade
     const questions = await SatQuestionBank.find({ _id: { $in: session.module_1.question_ids } }).lean();
@@ -352,7 +448,7 @@ const getModule2 = async (req, res) => {
     });
     if (!session) return res.status(404).json({ success: false, message: 'Session not ready for Module 2' });
 
-    const examConfig = await SatExamConfig.findById(session.exam_config_id).lean();
+    const examConfig = await loadConfigForSession(session);
     const m2Config   = session.module_2.tier === 'hard' ? examConfig.module_2_hard : examConfig.module_2_easy;
 
     const questions = await SatQuestionBank.find({ _id: { $in: session.module_2.question_ids } }).lean();
