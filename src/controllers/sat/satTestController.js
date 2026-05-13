@@ -115,14 +115,23 @@ const startSession = async (req, res) => {
         const rwConfig = testConfig.subjects?.reading_writing;
         if (!rwConfig) return res.status(404).json({ success: false, message: 'Reading & Writing not configured in this test' });
 
-        // Resume an in-progress attempt at M1
+        // Check for any active (non-complete) attempt to prevent duplicates
         const existing = await SatTestAttempt.findOne({
           student_id:     req.userId,
           test_config_id: testId,
-          status:         'rw_m1_in_progress',
+          status:         { $nin: ['complete'] },
         }).lean();
 
         if (existing) {
+          if (existing.status !== 'rw_m1_in_progress') {
+            // Already past M1 — don't create a new document, tell client to redirect
+            return res.status(409).json({
+              success:    false,
+              message:    'Test already in progress',
+              session_id: existing._id,
+              status:     existing.status,
+            });
+          }
           const questions = await SatQuestionBank.find({ _id: { $in: existing.reading_writing.module_1.question_ids } }).lean();
           return res.json({
             success:    true,
